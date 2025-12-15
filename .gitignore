@@ -1,0 +1,34 @@
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Database
+*.db
+*.db-wal
+*.db-shm
+
+# Build artifacts
+dist/
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# Claude Code
+.claude/
+
+# Ruff
+.ruff_cache/
+
+# Local notes
+thoughts/

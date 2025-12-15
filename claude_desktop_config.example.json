@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "task-queue": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/YOUR/ABSOLUTE/PATH/TO/agent-task-queue",
+        "python",
+        "task_queue.py"
+      ]
+    }
+  }
+}
