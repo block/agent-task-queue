@@ -96,7 +96,7 @@ With the queue:
 ## Installation
 
 ```bash
-uvx agent-task-queue
+uvx agent-task-queue@latest
 ```
 
 That's it. [uvx](https://docs.astral.sh/uv/guides/tools/) runs the package directly from PyPI—no clone, no install, no virtual environment.
@@ -110,7 +110,7 @@ Agent Task Queue works with any AI coding tool that supports MCP. Add this confi
   "mcpServers": {
     "agent-task-queue": {
       "command": "uvx",
-      "args": ["agent-task-queue"]
+      "args": ["agent-task-queue@latest"]
     }
   }
 }
@@ -124,7 +124,7 @@ Agent Task Queue works with any AI coding tool that supports MCP. Add this confi
 Install via CLI:
 
 ```bash
-amp mcp add agent-task-queue -- uvx agent-task-queue
+amp mcp add agent-task-queue -- uvx agent-task-queue@latest
 ```
 
 Or add to `.amp/settings.json` (workspace) or global settings. See [Amp Manual](https://ampcode.com/manual) for details.
@@ -137,7 +137,7 @@ Or add to `.amp/settings.json` (workspace) or global settings. See [Amp Manual](
 Install via CLI (<a href="https://docs.anthropic.com/en/docs/claude-code/mcp">guide</a>):
 
 ```bash
-claude mcp add agent-task-queue -- uvx agent-task-queue
+claude mcp add agent-task-queue -- uvx agent-task-queue@latest
 ```
 
 </details>
@@ -177,7 +177,7 @@ Config file locations:
     "agent-task-queue": {
       "type": "stdio",
       "command": "uvx",
-      "args": ["agent-task-queue"]
+      "args": ["agent-task-queue@latest"]
     }
   }
 }
@@ -251,15 +251,11 @@ run_task(
 )
 ```
 
-### Important: Configure Agent Rules
+### Note for Claude Code Users
 
-**The MCP tool won't be used automatically.** AI agents default to their built-in shell/Bash tools. You must add explicit instructions telling the agent to use `run_task` instead.
+Claude Code defaults to its built-in Bash tool for shell commands. To ensure it uses `run_task` instead, add instructions to your `CLAUDE.md` file.
 
-Without these rules, the agent will bypass the queue entirely and run builds directly via Bash, defeating the purpose of this tool.
-
-#### Claude Code
-
-Add to `~/.claude/CLAUDE.md` (applies to all projects) or `.claude/CLAUDE.md` (project-specific):
+Add to `~/.claude/CLAUDE.md` (global) or `.claude/CLAUDE.md` (project-specific):
 
 ```markdown
 ## Build Queue
@@ -281,57 +277,8 @@ For expensive build commands, ALWAYS use the `run_task` MCP tool instead of Bash
 NEVER run these commands directly via Bash. Always use the run_task MCP tool to prevent resource contention.
 ```
 
-#### Cursor
-
-Add to `.cursorrules` in your project root:
-
-```markdown
-## Build Queue
-
-For expensive build commands (gradle, bazel, docker, pytest, npm build), ALWAYS use the `run_task` MCP tool instead of running shell commands directly.
-
-Parameters:
-- command: The full shell command to run
-- working_directory: Absolute path to the project root
-- queue_name: Optional queue name for isolation (default: "global")
-- env_vars: Optional environment variables in "KEY=value,KEY2=value2" format
-
-This ensures builds are queued and don't compete for system resources.
-```
-
-#### Other Agents
-
-Add similar instructions to your agent's configuration file (`.windsurfrules`, `AGENTS.md`, etc.) telling it to use `run_task` for build commands.
-
-## Why MCP Instead of a CLI Tool?
-
-The first attempt at solving this problem was a file-based queue CLI that wrapped commands:
-
-```bash
-queue-cli ./gradlew build
-```
-
-**The fatal flaw:** AI tools have built-in shell timeouts (30s-120s). If a job waited in queue longer than the timeout, the agent gave up—even though the job would eventually run.
-
-```
-CLI Approach:                     MCP Approach:
-Agent → Shell → cli → queue       Agent → MCP Protocol → Server → queue
-       ↑                                              ↓
-       └── TIMEOUT! ──────────    (blocks until complete, no timeout)
-```
-
-**Why MCP solves this:**
-- The MCP server keeps the connection alive indefinitely
-- The agent's tool call blocks until the task completes
-- No timeout configuration needed—it "just works"
-- The server manages the queue; the agent just waits
-
-| Aspect | CLI Wrapper | Agent Task Queue |
-|--------|-------------|----------------|
-| Timeout handling | External workarounds | Solved by design |
-| Queue storage | Filesystem | SQLite (WAL mode) |
-| Integration | Wrap every command | Automatic tool selection |
-| Agent compatibility | Varies by tool | Universal |
+> [!NOTE]
+> Other agents like Amp may automatically use MCP tools without additional configuration.
 
 ## Configuration
 
@@ -353,7 +300,7 @@ Pass options via the `args` property in your MCP config:
     "agent-task-queue": {
       "command": "uvx",
       "args": [
-        "agent-task-queue",
+        "agent-task-queue@latest",
         "--max-output-files=100",
         "--lock-timeout=60"
       ]
@@ -362,7 +309,7 @@ Pass options via the `args` property in your MCP config:
 }
 ```
 
-Run `uvx agent-task-queue --help` to see all options.
+Run `uvx agent-task-queue@latest --help` to see all options.
 
 ## Architecture
 
@@ -479,7 +426,7 @@ tail -f /tmp/agent-task-queue/agent-task-queue-logs.json      # Follow live
 ### Server not connecting
 
 1. Ensure `uvx` is in your PATH (install [uv](https://github.com/astral-sh/uv) if needed)
-2. Test manually: `uvx agent-task-queue`
+2. Test manually: `uvx agent-task-queue@latest`
 
 ## Development
 
@@ -497,6 +444,45 @@ uv run python task_queue.py  # Run server locally
 
 - macOS
 - Linux
+
+## Why MCP Instead of a CLI Tool?
+
+The first attempt at solving this problem was a file-based queue CLI that wrapped commands:
+
+```bash
+queue-cli ./gradlew build
+```
+
+**The fatal flaw:** AI tools have built-in shell timeouts (30s-120s). If a job waited in queue longer than the timeout, the agent gave up—even though the job would eventually run.
+
+```mermaid
+flowchart LR
+    subgraph cli [CLI Approach]
+        A1[Agent] --> B1[Shell]
+        B1 --> C1[CLI]
+        C1 --> D1[Queue]
+        B1 -.-> |"⏱️ TIMEOUT!"| A1
+    end
+
+    subgraph mcp [MCP Approach]
+        A2[Agent] --> |MCP Protocol| B2[Server]
+        B2 --> C2[Queue]
+        B2 -.-> |"✓ blocks until complete"| A2
+    end
+```
+
+**Why MCP solves this:**
+- The MCP server keeps the connection alive indefinitely
+- The agent's tool call blocks until the task completes
+- No timeout configuration needed—it "just works"
+- The server manages the queue; the agent just waits
+
+| Aspect | CLI Wrapper | Agent Task Queue |
+|--------|-------------|----------------|
+| Timeout handling | External workarounds | Solved by design |
+| Queue storage | Filesystem | SQLite (WAL mode) |
+| Integration | Wrap every command | Automatic tool selection |
+| Agent compatibility | Varies by tool | Universal |
 
 ## License
 

@@ -23,6 +23,9 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
+        env:
+          UV_DEFAULT_INDEX: https://pypi.org/simple
+          UV_INDEX_URL: https://pypi.org/simple
         run: uv sync --all-extras
 
       - name: Lint with ruff
