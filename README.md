@@ -1,7 +1,8 @@
 # Agent Task Queue
 
 [![CI](https://github.com/block/agent-task-queue/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/block/agent-task-queue/actions/workflows/ci.yml)
-[![Release](https://github.com/block/agent-task-queue/actions/workflows/release.yml/badge.svg?branch=main&event=release)](https://github.com/block/agent-task-queue/actions/workflows/release.yml)
+[![PyPI version](https://img.shields.io/pypi/v/agent-task-queue)](https://pypi.org/project/agent-task-queue/)
+[![GitHub release](https://img.shields.io/github/v/release/block/agent-task-queue)](https://github.com/block/agent-task-queue/releases)
 
 **Local task queuing for AI agents.** Prevents multiple agents from running expensive operations concurrently and thrashing your machine.
 
