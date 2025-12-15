@@ -3,7 +3,7 @@ name: 🐛 Bug Report
 about: Thank you for taking the time, please report a reproducible bug
 title: "[Bug] <Bug Title Here>"
 labels: bug
-assignees: add codeowner's @name here 
+assignees: himattm
 
 ---
 
@@ -24,7 +24,8 @@ assignees: add codeowner's @name here
 *If applicable, add screenshots, output log and/or other documentation to help explain your problem.*
 
 **Environment (please complete the following information):**
- - OS: [ex: iOS]
+ - OS: [ex: Mac]
+ - Agent: [ex: claude]
  - Version 
 
 **Additional context**
