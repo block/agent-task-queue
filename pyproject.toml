@@ -1,12 +1,20 @@
 [project]
 name = "agent-task-queue"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server for sequential task execution via FIFO queue"
 readme = "README.md"
 requires-python = ">=3.10"
+authors = [
+    { name = "Matt McKenna", email = "mmckenna@block.xyz" },
+    { name = "Block", email = "opensource@block.xyz" },
+]
+license = "Apache-2.0"
 dependencies = [
     "fastmcp>=2.3.0",
 ]
+
+[project.scripts]
+agent-task-queue = "task_queue:main"
 
 [project.optional-dependencies]
 dev = [

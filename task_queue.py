@@ -616,5 +616,11 @@ async def clear_task_logs() -> str:
 # Initialize database on module load
 init_db()
 
-if __name__ == "__main__":
+
+def main():
+    """Entry point for uvx/CLI."""
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()
