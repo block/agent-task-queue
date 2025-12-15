@@ -1,5 +1,8 @@
 # Agent Task Queue
 
+[![CI](https://github.com/block/agent-task-queue/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/block/agent-task-queue/actions/workflows/ci.yml)
+[![Release](https://github.com/block/agent-task-queue/actions/workflows/release.yml/badge.svg?branch=main&event=release)](https://github.com/block/agent-task-queue/actions/workflows/release.yml)
+
 **Local task queuing for AI agents.** Prevents multiple agents from running expensive operations concurrently and thrashing your machine.
 
 ## The Problem
@@ -91,19 +94,11 @@ With the queue:
 
 ## Installation
 
-### Prerequisites
-
-- [uv](https://github.com/astral-sh/uv) package manager
-- Python 3.10+
-
-### Setup
-
 ```bash
-git clone https://github.com/block/agent-task-queue.git
-cd agent-task-queue
-uv sync
-uv run python -c "from task_queue import mcp; print('OK')"
+uvx agent-task-queue
 ```
+
+That's it. [uvx](https://docs.astral.sh/uv/guides/tools/) runs the package directly from PyPI—no clone, no install, no virtual environment.
 
 ## Agent Configuration
 
@@ -113,15 +108,12 @@ Agent Task Queue works with any AI coding tool that supports MCP. Add this confi
 {
   "mcpServers": {
     "agent-task-queue": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/agent-task-queue", "python", "task_queue.py"]
+      "command": "uvx",
+      "args": ["agent-task-queue"]
     }
   }
 }
 ```
-
-> [!NOTE]
-> Replace `/path/to/agent-task-queue` with the absolute path where you cloned this repository.
 
 ### MCP Client Configuration
 
@@ -131,7 +123,7 @@ Agent Task Queue works with any AI coding tool that supports MCP. Add this confi
 Install via CLI:
 
 ```bash
-amp mcp add agent-task-queue -- uv run --directory /path/to/agent-task-queue python task_queue.py
+amp mcp add agent-task-queue -- uvx agent-task-queue
 ```
 
 Or add to `.amp/settings.json` (workspace) or global settings. See [Amp Manual](https://ampcode.com/manual) for details.
@@ -144,7 +136,7 @@ Or add to `.amp/settings.json` (workspace) or global settings. See [Amp Manual](
 Install via CLI (<a href="https://docs.anthropic.com/en/docs/claude-code/mcp">guide</a>):
 
 ```bash
-claude mcp add agent-task-queue -- uv run --directory /path/to/agent-task-queue python task_queue.py
+claude mcp add agent-task-queue -- uvx agent-task-queue
 ```
 
 </details>
@@ -156,14 +148,14 @@ Config file locations:
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Linux**: `~/.config/Claude/claude_desktop_config.json`
 
-Use the standard config from above.
+Use the standard config above.
 
 </details>
 
 <details>
 <summary>Cline</summary>
 
-Open the MCP Servers panel > Configure > "Configure MCP Servers" to edit `cline_mcp_settings.json`. Use the standard config from above.
+Open the MCP Servers panel > Configure > "Configure MCP Servers" to edit `cline_mcp_settings.json`. Use the standard config above.
 
 See [Cline MCP docs](https://docs.cline.bot/mcp/configuring-mcp-servers) for details.
 
@@ -183,8 +175,8 @@ Config file locations:
   "servers": {
     "agent-task-queue": {
       "type": "stdio",
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/agent-task-queue", "python", "task_queue.py"]
+      "command": "uvx",
+      "args": ["agent-task-queue"]
     }
   }
 }
@@ -197,7 +189,7 @@ See [VS Code MCP docs](https://code.visualstudio.com/docs/copilot/chat/mcp-serve
 <details>
 <summary>Cursor</summary>
 
-Go to `Cursor Settings` > `MCP` > `+ Add new global MCP server`. Use the standard config from above.
+Go to `Cursor Settings` > `MCP` > `+ Add new global MCP server`. Use the standard config above.
 
 Config file locations:
 - **Global**: `~/.cursor/mcp.json`
@@ -210,7 +202,7 @@ See [Cursor MCP docs](https://docs.cursor.com/context/model-context-protocol) fo
 <details>
 <summary>Firebender</summary>
 
-Add to `firebender.json` in project root, or use Plugin Settings > MCP section. Use the standard config from above.
+Add to `firebender.json` in project root, or use Plugin Settings > MCP section. Use the standard config above.
 
 See [Firebender MCP docs](https://docs.firebender.com/context/mcp) for details.
 
@@ -221,7 +213,7 @@ See [Firebender MCP docs](https://docs.firebender.com/context/mcp) for details.
 
 Config file location: `~/.codeium/windsurf/mcp_config.json`
 
-Or use Windsurf Settings > Cascade > Manage MCPs. Use the standard config from above.
+Or use Windsurf Settings > Cascade > Manage MCPs. Use the standard config above.
 
 See [Windsurf MCP docs](https://docs.windsurf.com/windsurf/cascade/mcp) for details.
 
@@ -358,10 +350,9 @@ Pass options via the `args` property in your MCP config:
 {
   "mcpServers": {
     "agent-task-queue": {
-      "command": "uv",
+      "command": "uvx",
       "args": [
-        "run", "--directory", "/path/to/agent-task-queue",
-        "python", "task_queue.py",
+        "agent-task-queue",
         "--max-output-files=100",
         "--lock-timeout=60"
       ]
@@ -370,7 +361,7 @@ Pass options via the `args` property in your MCP config:
 }
 ```
 
-You can also run `uv run python task_queue.py --help` to see all options.
+Run `uvx agent-task-queue --help` to see all options.
 
 ## Architecture
 
@@ -486,16 +477,19 @@ tail -f /tmp/agent-task-queue/agent-task-queue-logs.json      # Follow live
 
 ### Server not connecting
 
-1. Verify the path to `agent-task-queue` is absolute
-2. Ensure `uv` is in your PATH
-3. Test manually: `uv run --directory /path/to/agent-task-queue python task_queue.py`
+1. Ensure `uvx` is in your PATH (install [uv](https://github.com/astral-sh/uv) if needed)
+2. Test manually: `uvx agent-task-queue`
 
 ## Development
 
+For contributors:
+
 ```bash
+git clone https://github.com/block/agent-task-queue.git
+cd agent-task-queue
 uv sync                      # Install dependencies
-uv run pytest -v             # Run tests (15 tests)
-uv run python task_queue.py  # Run server directly
+uv run pytest -v             # Run tests
+uv run python task_queue.py  # Run server locally
 ```
 
 ## Platform Support
