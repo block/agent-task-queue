@@ -32,3 +32,4 @@ dist/
 
 # Local notes
 thoughts/
+*.lock
