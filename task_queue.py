@@ -449,7 +449,8 @@ async def run_task(
         command: The full shell command to run.
         working_directory: ABSOLUTE path to the execution root.
         queue_name: Queue identifier for grouping tasks (default: "global").
-        timeout_seconds: Max runtime before killing the task (default: 1200 = 20 mins).
+        timeout_seconds: Max **execution** time before killing the task (default: 1200 = 20 mins).
+            Queue wait time does NOT count against this timeout.
         env_vars: Environment variables to set, format: "KEY1=value1,KEY2=value2"
 
     Returns:

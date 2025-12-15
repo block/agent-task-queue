@@ -87,7 +87,7 @@ With the queue:
 ## Key Features
 
 - **FIFO Queuing**: Strict first-in-first-out ordering
-- **No Timeouts**: MCP keeps connection alive indefinitely (see [Why MCP?](#why-mcp-instead-of-a-cli-tool))
+- **No Queue Timeouts**: MCP keeps connection alive while waiting in queue. The `timeout_seconds` parameter only applies to execution time—tasks can wait in queue indefinitely without timing out. (see [Why MCP?](#why-mcp-instead-of-a-cli-tool))
 - **Environment Variables**: Pass `env_vars="ANDROID_SERIAL=emulator-5560"`
 - **Multiple Queues**: Isolate different workloads with `queue_name`
 - **Zombie Protection**: Detects dead processes, kills orphans, clears stale locks
@@ -237,7 +237,7 @@ The `run_task` tool is automatically used by agents for heavy operations:
 | `command` | Yes | Shell command to execute |
 | `working_directory` | Yes | Absolute path to run from |
 | `queue_name` | No | Queue identifier (default: "global") |
-| `timeout_seconds` | No | Max runtime before kill (default: 1200) |
+| `timeout_seconds` | No | Max **execution** time before kill (default: 1200). Queue wait time doesn't count. |
 | `env_vars` | No | Environment variables: `"KEY=val,KEY2=val2"` |
 
 ### Example
