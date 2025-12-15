@@ -99,7 +99,7 @@ With the queue:
 ### Setup
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/block/agent-task-queue.git
 cd agent-task-queue
 uv sync
 uv run python -c "from task_queue import mcp; print('OK')"
