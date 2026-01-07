@@ -222,13 +222,15 @@ See [Windsurf MCP docs](https://docs.windsurf.com/windsurf/cascade/mcp) for deta
 
 ## Usage
 
-The `run_task` tool is automatically used by agents for heavy operations:
+Agents use the `run_task` MCP tool for expensive operations:
 
-**Build Tools:** gradle, gradlew, bazel, make, cmake, mvn, cargo build, go build, npm/yarn/pnpm build
+**Build Tools:** gradle, bazel, make, cmake, mvn, cargo build, go build, npm/yarn/pnpm build
 
 **Container Operations:** docker build, docker-compose, podman, kubectl, helm
 
 **Test Suites:** pytest, jest, mocha, rspec
+
+> **Note:** Some agents automatically prefer MCP tools (Amp, Copilot, Windsurf). Others may need [configuration](#agent-configuration-notes) to prefer `run_task` over built-in shell commands.
 
 ### Tool Parameters
 
@@ -251,34 +253,36 @@ run_task(
 )
 ```
 
-### Note for Claude Code Users
+### Agent Configuration Notes
 
-Claude Code defaults to its built-in Bash tool for shell commands. To ensure it uses `run_task` instead, add instructions to your `CLAUDE.md` file.
+Some agents need additional configuration to use the queue instead of built-in shell commands.
 
-Add to `~/.claude/CLAUDE.md` (global) or `.claude/CLAUDE.md` (project-specific):
+| Agent | Extra Setup | Notes |
+|-------|-------------|-------|
+| Amp, Copilot, Windsurf | ❌ None | Works out of the box |
+| **Claude Code, Cursor** | ✅ Required | Must remove Bash allowed rules |
+| Cline, Firebender | ⚠️ Maybe | Check agent docs |
 
-```markdown
-## Build Queue
+> [!IMPORTANT]
+> **Claude Code users:** If you have allowed rules like `Bash(gradle:*)` or `Bash(./gradlew:*)`, the agent will use Bash directly and **bypass the queue entirely**. You must remove these rules for the queue to work.
+>
+> Check both `settings.json` and `settings.local.json` (project and global) for rules like:
+> - `Bash(gradle:*)`, `Bash(./gradlew:*)`, `Bash(ANDROID_SERIAL=* ./gradlew:*)`
+> - `Bash(docker build:*)`, `Bash(pytest:*)`, etc.
+>
+> See [Claude Code setup guide](examples/claude-code/SETUP.md) for the full fix.
 
-For expensive build commands, ALWAYS use the `run_task` MCP tool instead of Bash.
+#### Quick Agent Setup
 
-**Commands that MUST use run_task:**
-- gradle, gradlew, ./gradlew (any Gradle command)
-- bazel, bazelisk
-- docker build, docker-compose
-- npm run build, yarn build, pnpm build
-- pytest, jest, mocha
+After installing the MCP server, tell your agent:
 
-**How to use:**
-- command: The full shell command
-- working_directory: Absolute path to the project root
-- env_vars: Environment variables like "ANDROID_SERIAL=emulator-5560"
-
-NEVER run these commands directly via Bash. Always use the run_task MCP tool to prevent resource contention.
+```
+"Configure agent-task-queue - use examples/<agent-name>/SETUP.md if available"
 ```
 
-> [!NOTE]
-> Other agents like Amp may automatically use MCP tools without additional configuration.
+**Available setup guides:**
+- [Claude Code setup](examples/claude-code/SETUP.md) - 3-step configuration
+- [Other agents](examples/) - Contributions welcome!
 
 ## Configuration
 
@@ -399,28 +403,49 @@ FAILED exit=1 12.5s output=/tmp/agent-task-queue/output/task_9.log
 
 **Manual cleanup**: Use the `clear_task_logs` tool to delete all output files.
 
-## Troubleshooting
+## CLI Tool
 
-### "Database is locked" errors
+The `atq` command lets you inspect the queue.
 
-The SQLite database uses WAL mode for concurrency. If you see lock errors:
+### Install CLI
+
 ```bash
-ps aux | grep task_queue                # Check for zombie processes
-rm -rf /tmp/agent-task-queue/             # Delete and restart
+uv tool install agent-task-queue
 ```
+
+This installs both the MCP server and the `atq` CLI persistently.
+
+### Usage
+
+```bash
+atq list              # Show current queue
+atq logs              # Show recent activity
+atq logs -n 50        # Show last 50 entries
+atq clear             # Clear stuck tasks
+atq --data-dir PATH   # Use custom data directory
+```
+
+Respects `TASK_QUEUE_DATA_DIR` environment variable.
+
+> **Note:** Without installing, you can run one-off commands with:
+> ```bash
+> uvx --from agent-task-queue atq list
+> ```
+
+## Troubleshooting
 
 ### Tasks stuck in queue
 
 ```bash
-sqlite3 /tmp/agent-task-queue/queue.db "SELECT * FROM queue;"   # Check status
-sqlite3 /tmp/agent-task-queue/queue.db "DELETE FROM queue;"     # Clear all
+atq list    # Check queue status
+atq clear   # Clear all tasks
 ```
 
-### View metrics
+### "Database is locked" errors
 
 ```bash
-cat /tmp/agent-task-queue/agent-task-queue-logs.json | jq .   # Pretty print logs
-tail -f /tmp/agent-task-queue/agent-task-queue-logs.json      # Follow live
+ps aux | grep task_queue                  # Check for zombie processes
+rm -rf /tmp/agent-task-queue/             # Delete and restart
 ```
 
 ### Server not connecting
