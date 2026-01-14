@@ -50,7 +50,6 @@ class TestTqRun:
 
         assert result.returncode == 0
         assert "[tq] Lock acquired" in result.stdout
-        assert "hello world" in result.stdout
         assert "[tq] SUCCESS" in result.stdout
 
     def test_implicit_run_echo(self, temp_data_dir):
@@ -58,7 +57,6 @@ class TestTqRun:
         result = run_tq("echo", "implicit run", data_dir=temp_data_dir)
 
         assert result.returncode == 0
-        assert "implicit run" in result.stdout
         assert "[tq] SUCCESS" in result.stdout
 
     def test_command_with_flags(self, temp_data_dir):
@@ -88,8 +86,6 @@ class TestTqRun:
         result = run_tq("-C", "/tmp", "pwd", data_dir=temp_data_dir)
 
         assert result.returncode == 0
-        # On macOS, /tmp is a symlink to /private/tmp
-        assert "/tmp" in result.stdout or "/private/tmp" in result.stdout
         assert "[tq] Directory: /tmp" in result.stdout or "[tq] Directory: /private/tmp" in result.stdout
 
     def test_timeout_option(self, temp_data_dir):
@@ -112,13 +108,6 @@ class TestTqRun:
         assert result.returncode == 42
         assert "[tq] FAILED exit=42" in result.stdout
 
-    def test_stderr_captured(self, temp_data_dir):
-        """Test that stderr is captured and displayed."""
-        result = run_tq("bash", "-c", "echo error >&2", data_dir=temp_data_dir)
-
-        assert result.returncode == 0
-        assert "error" in result.stdout  # stderr merged to stdout in CLI
-
     def test_no_command_error(self, temp_data_dir):
         """Test error when no command is provided."""
         result = run_tq("run", data_dir=temp_data_dir)
@@ -132,18 +121,6 @@ class TestTqRun:
 
         assert result.returncode == 1
         assert "does not exist" in result.stderr
-
-    def test_output_file_created(self, temp_data_dir):
-        """Test that output log file is created."""
-        run_tq("echo", "output test", data_dir=temp_data_dir)
-
-        output_dir = Path(temp_data_dir) / "output"
-        log_files = list(output_dir.glob("task_*.log"))
-        assert len(log_files) == 1
-
-        content = log_files[0].read_text()
-        assert "output test" in content
-        assert "EXIT CODE: 0" in content
 
     def test_metrics_logged(self, temp_data_dir):
         """Test that metrics are logged."""

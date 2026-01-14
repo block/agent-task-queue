@@ -13,7 +13,6 @@ import signal
 import sqlite3
 import subprocess
 import sys
-import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -162,11 +161,40 @@ def cmd_logs(args):
 # Configuration
 POLL_INTERVAL = 1.0  # seconds between queue checks
 MAX_LOCK_AGE_MINUTES = 120  # stale lock timeout
+MAX_METRICS_SIZE_MB = 5  # rotate log when exceeds this size
+
+
+def ensure_db(db_path: Path):
+    """Ensure database exists and is valid. Recreates if corrupted."""
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn.execute("SELECT 1 FROM queue LIMIT 1")
+        conn.close()
+    except sqlite3.OperationalError:
+        # Database missing or corrupted - clean up and reinitialize
+        for suffix in ["", "-wal", "-shm"]:
+            path = Path(str(db_path) + suffix)
+            if path.exists():
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
 
 
 def log_metric(data_dir: Path, event: str, **kwargs):
-    """Append a JSON metric entry to the log file."""
+    """Append a JSON metric entry to the log file. Rotates when size exceeds limit."""
     log_path = data_dir / "agent-task-queue-logs.json"
+
+    # Rotate if file exceeds size limit
+    if log_path.exists():
+        try:
+            size_mb = log_path.stat().st_size / (1024 * 1024)
+            if size_mb > MAX_METRICS_SIZE_MB:
+                rotated = log_path.with_suffix(".json.1")
+                log_path.rename(rotated)
+        except OSError:
+            pass
+
     entry = {
         "event": event,
         "timestamp": datetime.now().isoformat(),
@@ -200,8 +228,8 @@ def kill_process_tree(pid: int):
             pass
 
 
-def cleanup_queue(conn, queue_name: str):
-    """Clean up dead/stale locks."""
+def cleanup_queue(conn, queue_name: str, data_dir: Path):
+    """Clean up dead/stale locks and log metrics."""
     # Check for dead parents
     runners = conn.execute(
         "SELECT id, pid, child_pid FROM queue WHERE queue_name = ? AND status = 'running'",
@@ -215,6 +243,14 @@ def cleanup_queue(conn, queue_name: str):
                 kill_process_tree(child)
             conn.execute("DELETE FROM queue WHERE id = ?", (runner["id"],))
             conn.commit()
+            log_metric(
+                data_dir,
+                "zombie_cleared",
+                task_id=runner["id"],
+                queue_name=queue_name,
+                dead_pid=runner["pid"],
+                reason="parent_died",
+            )
 
     # Check for timeouts
     cutoff = (datetime.now() - timedelta(minutes=MAX_LOCK_AGE_MINUTES)).isoformat()
@@ -228,6 +264,14 @@ def cleanup_queue(conn, queue_name: str):
             kill_process_tree(task["child_pid"])
         conn.execute("DELETE FROM queue WHERE id = ?", (task["id"],))
         conn.commit()
+        log_metric(
+            data_dir,
+            "zombie_cleared",
+            task_id=task["id"],
+            queue_name=queue_name,
+            reason="timeout",
+            timeout_minutes=MAX_LOCK_AGE_MINUTES,
+        )
 
 
 def wait_for_turn(conn, queue_name: str, data_dir: Path) -> int:
@@ -249,7 +293,7 @@ def wait_for_turn(conn, queue_name: str, data_dir: Path) -> int:
     last_pos = -1
 
     while True:
-        cleanup_queue(conn, queue_name)
+        cleanup_queue(conn, queue_name, data_dir)
 
         runner = conn.execute(
             "SELECT id FROM queue WHERE queue_name = ? AND status = 'running'",
@@ -331,6 +375,9 @@ def cmd_run(args):
     db_path = data_dir / "queue.db"
     output_dir = data_dir / "output"
 
+    # Ensure database exists and is valid (recover if corrupted)
+    ensure_db(db_path)
+
     # Initialize database if needed
     conn = sqlite3.connect(db_path, timeout=60.0)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -356,9 +403,15 @@ def cmd_run(args):
 
     task_id = None
     proc = None
+    cleaned_up = False
 
     def cleanup_handler(signum, frame):
         """Handle Ctrl+C - clean up and exit."""
+        nonlocal cleaned_up
+        if cleaned_up:
+            return
+        cleaned_up = True
+
         print("\n[tq] Interrupted. Cleaning up...")
         if proc and proc.poll() is None:
             try:
@@ -370,8 +423,14 @@ def cmd_run(args):
                 except Exception:
                     pass
         if task_id:
-            release_lock(conn, task_id)
-        conn.close()
+            try:
+                release_lock(conn, task_id)
+            except Exception:
+                pass
+        try:
+            conn.close()
+        except Exception:
+            pass
         sys.exit(130)
 
     signal.signal(signal.SIGINT, cleanup_handler)
@@ -386,16 +445,13 @@ def cmd_run(args):
 
         start = time.time()
 
-        # Run subprocess with output streaming to terminal
+        # Run subprocess in passthrough mode - direct terminal connection
+        # This preserves rich output (progress bars, colors, etc.)
         proc = subprocess.Popen(
             command,
             shell=True,
             cwd=working_dir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            bufsize=1,
-            universal_newlines=True,
+            start_new_session=True,  # For clean process group kill
         )
 
         # Record child PID for zombie protection
@@ -404,37 +460,16 @@ def cmd_run(args):
         )
         conn.commit()
 
-        # Stream output to terminal and capture for log
-        # Use a thread to read output while main thread monitors timeout
-        output_lines = []
-        timed_out = False
-
-        def read_output():
-            for line in proc.stdout:
-                print(line, end="", flush=True)
-                output_lines.append(line.rstrip())
-
-        reader_thread = threading.Thread(target=read_output, daemon=True)
-        reader_thread.start()
-
-        # Wait for process with timeout
+        # Wait for process (Ctrl+C will trigger cleanup_handler)
         try:
-            proc.wait(timeout=timeout)
+            proc.wait(timeout=timeout if timeout else None)
         except subprocess.TimeoutExpired:
-            timed_out = True
+            print(f"\n[tq] TIMEOUT after {timeout}s")
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except OSError:
                 pass
             proc.wait()
-
-        # Wait for reader thread to finish
-        reader_thread.join(timeout=1)
-
-        if timed_out:
-            duration = time.time() - start
-            print("-" * 60)
-            print(f"[tq] TIMEOUT after {timeout}s")
             log_metric(
                 data_dir,
                 "task_timeout",
@@ -462,19 +497,7 @@ def cmd_run(args):
             command=command,
             exit_code=exit_code,
             duration_seconds=round(duration, 2),
-            stdout_lines=len(output_lines),
         )
-
-        # Write output to log file
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_file = output_dir / f"task_{task_id}.log"
-        with open(output_file, "w") as f:
-            f.write(f"COMMAND: {command}\n")
-            f.write(f"EXIT CODE: {exit_code}\n")
-            f.write(f"DURATION: {duration:.1f}s\n")
-            f.write(f"WORKING DIR: {working_dir}\n")
-            f.write("\n--- OUTPUT ---\n")
-            f.write("\n".join(output_lines))
 
         return exit_code
 
@@ -491,9 +514,16 @@ def cmd_run(args):
         return 1
 
     finally:
-        if task_id:
-            release_lock(conn, task_id)
-        conn.close()
+        if not cleaned_up:
+            if task_id:
+                try:
+                    release_lock(conn, task_id)
+                except Exception:
+                    pass
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def main():
