@@ -405,7 +405,7 @@ FAILED exit=1 12.5s output=/tmp/agent-task-queue/output/task_9.log
 
 ## CLI Tool
 
-The `atq` command lets you inspect the queue.
+The `tq` command lets you run commands through the queue and inspect queue status.
 
 ### Install CLI
 
@@ -413,23 +413,37 @@ The `atq` command lets you inspect the queue.
 uv tool install agent-task-queue
 ```
 
-This installs both the MCP server and the `atq` CLI persistently.
+This installs both the MCP server and the `tq` CLI persistently.
 
-### Usage
+### Running Commands
+
+Run commands through the same queue that agents use:
 
 ```bash
-atq list              # Show current queue
-atq logs              # Show recent activity
-atq logs -n 50        # Show last 50 entries
-atq clear             # Clear stuck tasks
-atq --data-dir PATH   # Use custom data directory
+tq ./gradlew assembleDebug          # Run a build through the queue
+tq npm run build                    # Any command works
+tq -q android ./gradlew test        # Use a specific queue
+tq -t 600 npm test                  # Custom timeout (seconds)
+tq -C /path/to/project make         # Set working directory
+```
+
+This prevents resource contention between you and AI agents - when you run a build via `tq`, any agent-initiated builds will wait in the same queue.
+
+### Inspecting the Queue
+
+```bash
+tq list              # Show current queue
+tq logs              # Show recent activity
+tq logs -n 50        # Show last 50 entries
+tq clear             # Clear stuck tasks
+tq --data-dir PATH   # Use custom data directory
 ```
 
 Respects `TASK_QUEUE_DATA_DIR` environment variable.
 
 > **Note:** Without installing, you can run one-off commands with:
 > ```bash
-> uvx --from agent-task-queue atq list
+> uvx --from agent-task-queue tq list
 > ```
 
 ## Troubleshooting
@@ -437,8 +451,8 @@ Respects `TASK_QUEUE_DATA_DIR` environment variable.
 ### Tasks stuck in queue
 
 ```bash
-atq list    # Check queue status
-atq clear   # Clear all tasks
+tq list    # Check queue status
+tq clear   # Clear all tasks
 ```
 
 ### "Database is locked" errors

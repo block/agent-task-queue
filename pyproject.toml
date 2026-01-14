@@ -15,7 +15,7 @@ dependencies = [
 
 [project.scripts]
 agent-task-queue = "task_queue:main"
-atq = "atq:main"
+tq = "tq:main"
 
 [project.optional-dependencies]
 dev = [
@@ -30,4 +30,4 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]
-only-include = ["task_queue.py", "atq.py"]
+only-include = ["task_queue.py", "tq.py"]
