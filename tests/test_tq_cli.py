@@ -4,11 +4,9 @@ Tests the command-line interface for running tasks and inspecting the queue.
 """
 
 import json
-import os
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
@@ -188,7 +186,7 @@ class TestTqLogs:
 
         assert result.returncode == 0
         # Should have limited output (3 lines)
-        lines = [l for l in result.stdout.strip().split("\n") if l]
+        lines = [line for line in result.stdout.strip().split("\n") if line]
         assert len(lines) == 3
 
 

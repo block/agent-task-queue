@@ -339,7 +339,7 @@ def wait_for_turn(conn, queue_name: str, data_dir: Path) -> int:
             if wait_time > 1:
                 print(f"[tq] Lock acquired after {wait_time:.1f}s wait")
             else:
-                print(f"[tq] Lock acquired")
+                print("[tq] Lock acquired")
             return task_id
 
         time.sleep(POLL_INTERVAL)
@@ -373,7 +373,6 @@ def cmd_run(args):
     data_dir = get_data_dir(args)
     data_dir.mkdir(parents=True, exist_ok=True)
     db_path = data_dir / "queue.db"
-    output_dir = data_dir / "output"
 
     # Ensure database exists and is valid (recover if corrupted)
     ensure_db(db_path)
