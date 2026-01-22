@@ -264,3 +264,135 @@ class TestQueueIntegration:
 
         # Queue should be empty after task completes
         assert "empty" in result.stdout.lower()
+
+
+class TestSignalHandling:
+    """Test signal handling and cleanup on interrupt."""
+
+    def test_sigint_cleanup_waiting_task(self, temp_data_dir):
+        """
+        Test that SIGINT (Ctrl+C) properly cleans up a waiting task.
+
+        This tests the fix for the bug where Ctrl+C during the wait phase
+        would leave orphaned 'waiting' tasks in the queue.
+        """
+        import os
+        import signal
+        import sqlite3
+        import time
+
+        db_path = Path(temp_data_dir) / "queue.db"
+
+        # First, start a long-running task to hold the lock
+        # Use start_new_session to isolate the process group
+        blocker = subprocess.Popen(
+            [sys.executable, str(TQ_PATH), f"--data-dir={temp_data_dir}", "sleep", "30"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+
+        # Wait for blocker to start and acquire lock
+        time.sleep(0.5)
+
+        # Verify blocker has the lock
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        running = conn.execute("SELECT * FROM queue WHERE status = 'running'").fetchone()
+        assert running is not None, "Blocker should be running"
+        blocker_task_id = running["id"]
+
+        # Now start a second task that will wait in queue
+        waiter = subprocess.Popen(
+            [sys.executable, str(TQ_PATH), f"--data-dir={temp_data_dir}", "echo", "waited"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+
+        # Wait for waiter to register in queue
+        time.sleep(0.5)
+
+        # Verify waiter is in waiting state
+        waiting = conn.execute("SELECT * FROM queue WHERE status = 'waiting'").fetchone()
+        assert waiting is not None, "Waiter should be in waiting state"
+        waiter_task_id = waiting["id"]
+
+        # Send SIGINT to the waiting process (simulating Ctrl+C)
+        waiter.send_signal(signal.SIGINT)
+
+        # Wait for waiter to exit
+        waiter.wait(timeout=5)
+        assert waiter.returncode == 130, "Waiter should exit with 130 (128 + SIGINT)"
+
+        # Verify the waiting task was cleaned up
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        remaining_waiting = conn.execute(
+            "SELECT * FROM queue WHERE status = 'waiting' AND id = ?", (waiter_task_id,)
+        ).fetchone()
+        assert remaining_waiting is None, "Waiting task should be cleaned up after SIGINT"
+
+        # Clean up: kill the blocker
+        try:
+            os.killpg(os.getpgid(blocker.pid), signal.SIGTERM)
+        except Exception:
+            blocker.terminate()
+        blocker.wait(timeout=5)
+        conn.close()
+
+    def test_sigint_cleanup_running_task(self, temp_data_dir):
+        """
+        Test that SIGINT properly cleans up a running task and its subprocess.
+        """
+        import os
+        import signal
+        import sqlite3
+        import time
+
+        db_path = Path(temp_data_dir) / "queue.db"
+
+        # Start a task that will run for a while
+        proc = subprocess.Popen(
+            [sys.executable, str(TQ_PATH), f"--data-dir={temp_data_dir}", "sleep", "30"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,  # So we can kill the whole group
+        )
+
+        # Wait for it to start running
+        time.sleep(0.5)
+
+        # Verify it's running
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        running = conn.execute("SELECT * FROM queue WHERE status = 'running'").fetchone()
+        assert running is not None, "Task should be running"
+        task_id = running["id"]
+        child_pid = running["child_pid"]
+        assert child_pid is not None, "Child PID should be recorded"
+
+        # Send SIGINT
+        proc.send_signal(signal.SIGINT)
+
+        # Wait for cleanup
+        proc.wait(timeout=10)
+        assert proc.returncode == 130, "Should exit with 130 (128 + SIGINT)"
+
+        # Verify task was cleaned up
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        remaining = conn.execute(
+            "SELECT * FROM queue WHERE id = ?", (task_id,)
+        ).fetchone()
+        assert remaining is None, "Task should be cleaned up from queue"
+
+        # Verify child process is dead
+        try:
+            os.kill(child_pid, 0)
+            # If we get here, process is still alive - that's bad
+            assert False, f"Child process {child_pid} should be dead"
+        except OSError:
+            pass  # Expected - process is dead
+
+        conn.close()

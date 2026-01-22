@@ -14,28 +14,45 @@ import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
+# Import shared queue infrastructure
+from queue_core import (
+    QueuePaths,
+    get_db,
+    init_db,
+    ensure_db,
+    cleanup_queue as _cleanup_queue,
+    log_metric as _log_metric,
+    release_lock,
+    is_process_alive,
+    kill_process_tree,
+    POLL_INTERVAL_WAITING,
+    DEFAULT_MAX_LOCK_AGE_MINUTES,
+    DEFAULT_MAX_METRICS_SIZE_MB,
+)
 
-def get_data_dir(args):
-    """Get data directory from args or environment."""
+
+def get_paths(args) -> QueuePaths:
+    """Get queue paths from args or environment."""
     if args.data_dir:
-        return Path(args.data_dir)
-    return Path(os.environ.get("TASK_QUEUE_DATA_DIR", "/tmp/agent-task-queue"))
+        data_dir = Path(args.data_dir)
+    else:
+        data_dir = Path(os.environ.get("TASK_QUEUE_DATA_DIR", "/tmp/agent-task-queue"))
+    return QueuePaths.from_data_dir(data_dir)
 
 
 def cmd_list(args):
     """List all tasks in the queue."""
-    data_dir = get_data_dir(args)
-    db_path = data_dir / "queue.db"
+    paths = get_paths(args)
 
-    if not db_path.exists():
-        print(f"No queue database found at {db_path}")
+    if not paths.db_path.exists():
+        print(f"No queue database found at {paths.db_path}")
         print("Queue is empty (no tasks have been run yet)")
         return
 
-    conn = sqlite3.connect(db_path, timeout=5.0)
+    conn = sqlite3.connect(paths.db_path, timeout=5.0)
     conn.row_factory = sqlite3.Row
 
     try:
@@ -83,14 +100,13 @@ def cmd_list(args):
 
 def cmd_clear(args):
     """Clear all tasks from the queue."""
-    data_dir = get_data_dir(args)
-    db_path = data_dir / "queue.db"
+    paths = get_paths(args)
 
-    if not db_path.exists():
+    if not paths.db_path.exists():
         print("No queue database found")
         return
 
-    conn = sqlite3.connect(db_path, timeout=5.0)
+    conn = sqlite3.connect(paths.db_path, timeout=5.0)
     try:
         # Check how many tasks exist
         count = conn.execute("SELECT COUNT(*) FROM queue").fetchone()[0]
@@ -112,16 +128,13 @@ def cmd_clear(args):
 
 def cmd_logs(args):
     """Show recent log entries."""
-    data_dir = get_data_dir(args)
-    log_path = data_dir / "agent-task-queue-logs.json"
+    paths = get_paths(args)
 
-    if not log_path.exists():
-        print(f"No log file found at {log_path}")
+    if not paths.metrics_path.exists():
+        print(f"No log file found at {paths.metrics_path}")
         return
 
-    import json
-
-    lines = log_path.read_text().strip().split("\n")
+    lines = paths.metrics_path.read_text().strip().split("\n")
     recent = lines[-args.n:] if len(lines) > args.n else lines
 
     for line in recent:
@@ -150,6 +163,9 @@ def cmd_logs(args):
             elif event == "zombie_cleared":
                 reason = entry.get("reason", "?")
                 print(f"{ts} [{queue}] #{task_id} zombie cleared ({reason})")
+            elif event == "orphan_cleared":
+                reason = entry.get("reason", "?")
+                print(f"{ts} [{queue}] #{task_id} orphan cleared ({reason})")
             else:
                 print(f"{ts} {event}")
         except json.JSONDecodeError:
@@ -158,124 +174,18 @@ def cmd_logs(args):
 
 # --- Run Command Implementation ---
 
-# Configuration
-POLL_INTERVAL = 1.0  # seconds between queue checks
-MAX_LOCK_AGE_MINUTES = 120  # stale lock timeout
-MAX_METRICS_SIZE_MB = 5  # rotate log when exceeds this size
+def log_metric(paths: QueuePaths, event: str, **kwargs):
+    """Log metric using paths (wrapper for CLI)."""
+    _log_metric(paths.metrics_path, event, DEFAULT_MAX_METRICS_SIZE_MB, **kwargs)
 
 
-def ensure_db(db_path: Path):
-    """Ensure database exists and is valid. Recreates if corrupted."""
-    try:
-        conn = sqlite3.connect(db_path, timeout=5.0)
-        conn.execute("SELECT 1 FROM queue LIMIT 1")
-        conn.close()
-    except sqlite3.OperationalError:
-        # Database missing or corrupted - clean up and reinitialize
-        for suffix in ["", "-wal", "-shm"]:
-            path = Path(str(db_path) + suffix)
-            if path.exists():
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
+def cleanup_queue(conn, queue_name: str, paths: QueuePaths):
+    """Clean up queue (wrapper for CLI)."""
+    _cleanup_queue(conn, queue_name, paths.metrics_path, DEFAULT_MAX_LOCK_AGE_MINUTES)
 
 
-def log_metric(data_dir: Path, event: str, **kwargs):
-    """Append a JSON metric entry to the log file. Rotates when size exceeds limit."""
-    log_path = data_dir / "agent-task-queue-logs.json"
-
-    # Rotate if file exceeds size limit
-    if log_path.exists():
-        try:
-            size_mb = log_path.stat().st_size / (1024 * 1024)
-            if size_mb > MAX_METRICS_SIZE_MB:
-                rotated = log_path.with_suffix(".json.1")
-                log_path.rename(rotated)
-        except OSError:
-            pass
-
-    entry = {
-        "event": event,
-        "timestamp": datetime.now().isoformat(),
-        **kwargs,
-    }
-    with open(log_path, "a") as f:
-        f.write(json.dumps(entry) + "\n")
-
-
-def is_process_alive(pid: int) -> bool:
-    """Check if a process ID exists."""
-    if pid is None:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-
-def kill_process_tree(pid: int):
-    """Kill a process and all its children."""
-    if not pid or not is_process_alive(pid):
-        return
-    try:
-        os.killpg(pid, signal.SIGTERM)
-    except OSError:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-
-
-def cleanup_queue(conn, queue_name: str, data_dir: Path):
-    """Clean up dead/stale locks and log metrics."""
-    # Check for dead parents
-    runners = conn.execute(
-        "SELECT id, pid, child_pid FROM queue WHERE queue_name = ? AND status = 'running'",
-        (queue_name,),
-    ).fetchall()
-
-    for runner in runners:
-        if not is_process_alive(runner["pid"]):
-            child = runner["child_pid"]
-            if child and is_process_alive(child):
-                kill_process_tree(child)
-            conn.execute("DELETE FROM queue WHERE id = ?", (runner["id"],))
-            conn.commit()
-            log_metric(
-                data_dir,
-                "zombie_cleared",
-                task_id=runner["id"],
-                queue_name=queue_name,
-                dead_pid=runner["pid"],
-                reason="parent_died",
-            )
-
-    # Check for timeouts
-    cutoff = (datetime.now() - timedelta(minutes=MAX_LOCK_AGE_MINUTES)).isoformat()
-    stale = conn.execute(
-        "SELECT id, child_pid FROM queue WHERE queue_name = ? AND status = 'running' AND updated_at < ?",
-        (queue_name, cutoff),
-    ).fetchall()
-
-    for task in stale:
-        if task["child_pid"]:
-            kill_process_tree(task["child_pid"])
-        conn.execute("DELETE FROM queue WHERE id = ?", (task["id"],))
-        conn.commit()
-        log_metric(
-            data_dir,
-            "zombie_cleared",
-            task_id=task["id"],
-            queue_name=queue_name,
-            reason="timeout",
-            timeout_minutes=MAX_LOCK_AGE_MINUTES,
-        )
-
-
-def wait_for_turn(conn, queue_name: str, data_dir: Path) -> int:
-    """Register task, wait for turn, return task ID when acquired."""
+def register_task(conn, queue_name: str, paths: QueuePaths) -> int:
+    """Register a task in the queue. Returns task_id immediately."""
     my_pid = os.getpid()
 
     cursor = conn.execute(
@@ -285,15 +195,20 @@ def wait_for_turn(conn, queue_name: str, data_dir: Path) -> int:
     conn.commit()
     task_id = cursor.lastrowid
 
-    log_metric(data_dir, "task_queued", task_id=task_id, queue_name=queue_name, pid=my_pid)
-    queued_at = time.time()
-
+    log_metric(paths, "task_queued", task_id=task_id, queue_name=queue_name, pid=my_pid)
     print(f"[tq] Task #{task_id} queued in '{queue_name}'")
+    return task_id
+
+
+def wait_for_turn(conn, queue_name: str, task_id: int, paths: QueuePaths) -> None:
+    """Wait for the task's turn to run. Task must already be registered."""
+    my_pid = os.getpid()
+    queued_at = time.time()
 
     last_pos = -1
 
     while True:
-        cleanup_queue(conn, queue_name, data_dir)
+        cleanup_queue(conn, queue_name, paths)
 
         runner = conn.execute(
             "SELECT id FROM queue WHERE queue_name = ? AND status = 'running'",
@@ -310,7 +225,7 @@ def wait_for_turn(conn, queue_name: str, data_dir: Path) -> int:
                 print(f"[tq] Position #{pos} in queue. Waiting...")
                 last_pos = pos
 
-            time.sleep(POLL_INTERVAL)
+            time.sleep(POLL_INTERVAL_WAITING)
             continue
 
         # Try to acquire lock atomically
@@ -330,7 +245,7 @@ def wait_for_turn(conn, queue_name: str, data_dir: Path) -> int:
         if cursor.rowcount > 0:
             wait_time = time.time() - queued_at
             log_metric(
-                data_dir,
+                paths,
                 "task_started",
                 task_id=task_id,
                 queue_name=queue_name,
@@ -340,18 +255,9 @@ def wait_for_turn(conn, queue_name: str, data_dir: Path) -> int:
                 print(f"[tq] Lock acquired after {wait_time:.1f}s wait")
             else:
                 print("[tq] Lock acquired")
-            return task_id
+            return  # Lock acquired, task_id was passed in
 
-        time.sleep(POLL_INTERVAL)
-
-
-def release_lock(conn, task_id: int):
-    """Release a queue lock."""
-    try:
-        conn.execute("DELETE FROM queue WHERE id = ?", (task_id,))
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass
+        time.sleep(POLL_INTERVAL_WAITING)
 
 
 def cmd_run(args):
@@ -370,35 +276,22 @@ def cmd_run(args):
         print(f"Error: Working directory does not exist: {working_dir}", file=sys.stderr)
         sys.exit(1)
 
-    data_dir = get_data_dir(args)
-    data_dir.mkdir(parents=True, exist_ok=True)
-    db_path = data_dir / "queue.db"
+    paths = get_paths(args)
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
 
     # Ensure database exists and is valid (recover if corrupted)
-    ensure_db(db_path)
+    ensure_db(paths)
 
-    # Initialize database if needed
-    conn = sqlite3.connect(db_path, timeout=60.0)
+    # Get database connection
+    with get_db(paths.db_path) as conn:
+        # Initialize schema if needed (idempotent via IF NOT EXISTS)
+        init_db(paths)
+
+    # Open connection for the duration of the run
+    conn = sqlite3.connect(paths.db_path, timeout=60.0)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=60000")
     conn.row_factory = sqlite3.Row
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS queue (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            queue_name TEXT NOT NULL,
-            status TEXT NOT NULL,
-            pid INTEGER,
-            child_pid INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_queue_status
-        ON queue(queue_name, status)
-    """)
-    conn.commit()
 
     task_id = None
     proc = None
@@ -436,7 +329,9 @@ def cmd_run(args):
     signal.signal(signal.SIGTERM, cleanup_handler)
 
     try:
-        task_id = wait_for_turn(conn, queue_name, data_dir)
+        # Register task first so task_id is available for cleanup if interrupted
+        task_id = register_task(conn, queue_name, paths)
+        wait_for_turn(conn, queue_name, task_id, paths)
 
         print(f"[tq] Running: {command}")
         print(f"[tq] Directory: {working_dir}")
@@ -470,7 +365,7 @@ def cmd_run(args):
                 pass
             proc.wait()
             log_metric(
-                data_dir,
+                paths,
                 "task_timeout",
                 task_id=task_id,
                 queue_name=queue_name,
@@ -489,7 +384,7 @@ def cmd_run(args):
             print(f"[tq] FAILED exit={exit_code} in {duration:.1f}s")
 
         log_metric(
-            data_dir,
+            paths,
             "task_completed",
             task_id=task_id,
             queue_name=queue_name,
@@ -504,7 +399,7 @@ def cmd_run(args):
         print(f"[tq] Error: {e}", file=sys.stderr)
         if task_id:
             log_metric(
-                data_dir,
+                paths,
                 "task_error",
                 task_id=task_id,
                 queue_name=queue_name,
