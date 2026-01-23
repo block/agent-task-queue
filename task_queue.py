@@ -13,12 +13,23 @@ import resource
 import signal
 import sqlite3
 import time
+import threading
+import uuid
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_context
+
+# Unique identifier for this server instance - used to detect orphaned tasks
+# from previous server instances even if the PID is reused
+SERVER_INSTANCE_ID = str(uuid.uuid4())[:8]
+
+# Track active task IDs being processed by this server instance
+# Used to detect orphaned queue entries when clients disconnect without proper cleanup
+_active_task_ids: set[int] = set()
+_active_task_ids_lock = threading.Lock()
 
 # Import shared queue infrastructure
 from queue_core import (
@@ -118,7 +129,7 @@ def log_metric(event: str, **kwargs):
 
 
 def cleanup_queue(conn, queue_name: str):
-    """Clean up queue using configured paths."""
+    """Clean up queue using configured paths and detect orphaned tasks."""
     _cleanup_queue(
         conn,
         queue_name,
@@ -126,6 +137,58 @@ def cleanup_queue(conn, queue_name: str):
         MAX_LOCK_AGE_MINUTES,
         log_fn=lambda msg: print(log_fmt(msg)),
     )
+
+    my_pid = os.getpid()
+
+    # Cleanup 1: Tasks with our PID but DIFFERENT server_id (from old server instance)
+    # This handles the edge case where PID is reused after server restart
+    stale_server_tasks = conn.execute(
+        "SELECT id, status, child_pid, server_id FROM queue WHERE queue_name = ? AND pid = ? AND server_id IS NOT NULL AND server_id != ?",
+        (queue_name, my_pid, SERVER_INSTANCE_ID),
+    ).fetchall()
+
+    for task in stale_server_tasks:
+        if task["child_pid"] and is_process_alive(task["child_pid"]):
+            print(log_fmt(f"WARNING: Killing orphaned subprocess {task['child_pid']} from old server"))
+            kill_process_tree(task["child_pid"])
+
+        conn.execute("DELETE FROM queue WHERE id = ?", (task["id"],))
+        log_metric(
+            "orphan_cleared",
+            task_id=task["id"],
+            queue_name=queue_name,
+            status=task["status"],
+            old_server_id=task["server_id"],
+            reason="stale_server_instance",
+        )
+        print(log_fmt(f"WARNING: Cleared task from old server instance (ID: {task['id']}, old_server: {task['server_id']})"))
+
+    # Cleanup 2: Tasks with our PID AND server_id but not in active tracking set
+    # This catches tasks left behind when clients disconnect without proper cleanup
+    our_tasks = conn.execute(
+        "SELECT id, status, child_pid FROM queue WHERE queue_name = ? AND pid = ? AND (server_id = ? OR server_id IS NULL)",
+        (queue_name, my_pid, SERVER_INSTANCE_ID),
+    ).fetchall()
+
+    with _active_task_ids_lock:
+        active_ids = _active_task_ids.copy()
+
+    for orphan in our_tasks:
+        if orphan["id"] not in active_ids:
+            # This task belongs to us but we're not tracking it - it's orphaned
+            if orphan["child_pid"] and is_process_alive(orphan["child_pid"]):
+                print(log_fmt(f"WARNING: Killing orphaned subprocess {orphan['child_pid']}"))
+                kill_process_tree(orphan["child_pid"])
+
+            conn.execute("DELETE FROM queue WHERE id = ?", (orphan["id"],))
+            log_metric(
+                "orphan_cleared",
+                task_id=orphan["id"],
+                queue_name=queue_name,
+                status=orphan["status"],
+                reason="not_in_active_set",
+            )
+            print(log_fmt(f"WARNING: Cleared orphaned task (ID: {orphan['id']}, status: {orphan['status']})"))
 
 
 # --- Output File Management ---
@@ -173,6 +236,11 @@ async def wait_for_turn(queue_name: str) -> int:
     # Ensure database exists and is valid
     ensure_db()
 
+    # Run cleanup BEFORE inserting - this clears orphaned tasks that would otherwise
+    # block the queue forever (since cleanup only runs during polling)
+    with get_db() as conn:
+        cleanup_queue(conn, queue_name)
+
     my_pid = os.getpid()
     ctx = None
     try:
@@ -182,10 +250,14 @@ async def wait_for_turn(queue_name: str) -> int:
 
     with get_db() as conn:
         cursor = conn.execute(
-            "INSERT INTO queue (queue_name, status, pid) VALUES (?, ?, ?)",
-            (queue_name, "waiting", my_pid),
+            "INSERT INTO queue (queue_name, status, pid, server_id) VALUES (?, ?, ?, ?)",
+            (queue_name, "waiting", my_pid, SERVER_INSTANCE_ID),
         )
         task_id = cursor.lastrowid
+
+    # Track this task as active for orphan detection
+    with _active_task_ids_lock:
+        _active_task_ids.add(task_id)
 
     log_metric("task_queued", task_id=task_id, queue_name=queue_name, pid=my_pid)
     queued_at = time.time()
@@ -198,72 +270,90 @@ async def wait_for_turn(queue_name: str) -> int:
     last_pos = -1
     wait_ticks = 0
 
-    while True:
-        with get_db() as conn:
-            cleanup_queue(conn, queue_name)
+    try:
+        while True:
+            with get_db() as conn:
+                cleanup_queue(conn, queue_name)
 
-            runner = conn.execute(
-                "SELECT id FROM queue WHERE queue_name = ? AND status = 'running'",
-                (queue_name,),
-            ).fetchone()
+                runner = conn.execute(
+                    "SELECT id FROM queue WHERE queue_name = ? AND status = 'running'",
+                    (queue_name,),
+                ).fetchone()
 
-            if runner:
-                pos = (
-                    conn.execute(
-                        "SELECT COUNT(*) as c FROM queue WHERE queue_name = ? AND status = 'waiting' AND id < ?",
-                        (queue_name, task_id),
-                    ).fetchone()["c"]
-                    + 1
-                )
-
-                wait_ticks += 1
-
-                if pos != last_pos:
-                    if ctx:
-                        await ctx.info(log_fmt(f"Position #{pos} in queue. Waiting..."))
-                    last_pos = pos
-                elif wait_ticks % 3 == 0 and ctx:  # Update every ~15 seconds
-                    await ctx.info(
-                        log_fmt(
-                            f"Still waiting... Position #{pos} ({wait_ticks * 5}s elapsed)"
-                        )
+                if runner:
+                    pos = (
+                        conn.execute(
+                            "SELECT COUNT(*) as c FROM queue WHERE queue_name = ? AND status = 'waiting' AND id < ?",
+                            (queue_name, task_id),
+                        ).fetchone()["c"]
+                        + 1
                     )
 
-                await asyncio.sleep(POLL_INTERVAL_WAITING)
-                continue
+                    wait_ticks += 1
 
-            # Atomic lock acquisition: UPDATE only succeeds if we're the first
-            # waiting task AND no one is currently running. This prevents race
-            # conditions where two tasks both think they're next.
-            cursor = conn.execute(
-                """UPDATE queue SET status = 'running', updated_at = ?, pid = ?
-                   WHERE id = ? AND status = 'waiting'
-                   AND NOT EXISTS (
-                       SELECT 1 FROM queue WHERE queue_name = ? AND status = 'running'
-                   )
-                   AND id = (
-                       SELECT MIN(id) FROM queue WHERE queue_name = ? AND status = 'waiting'
-                   )""",
-                (datetime.now().isoformat(), my_pid, task_id, queue_name, queue_name),
-            )
+                    if pos != last_pos:
+                        if ctx:
+                            await ctx.info(log_fmt(f"Position #{pos} in queue. Waiting..."))
+                        last_pos = pos
+                    elif wait_ticks % 10 == 0 and ctx:  # Update every ~10 polls
+                        await ctx.info(
+                            log_fmt(
+                                f"Still waiting... Position #{pos} ({int(wait_ticks * POLL_INTERVAL_WAITING)}s elapsed)"
+                            )
+                        )
 
-            if cursor.rowcount > 0:
-                wait_time = time.time() - queued_at
-                log_metric(
-                    "task_started",
-                    task_id=task_id,
-                    queue_name=queue_name,
-                    wait_time_seconds=round(wait_time, 2),
+                    await asyncio.sleep(POLL_INTERVAL_WAITING)
+                    continue
+
+                # Atomic lock acquisition: UPDATE only succeeds if we're the first
+                # waiting task AND no one is currently running. This prevents race
+                # conditions where two tasks both think they're next.
+                cursor = conn.execute(
+                    """UPDATE queue SET status = 'running', updated_at = ?, pid = ?
+                       WHERE id = ? AND status = 'waiting'
+                       AND NOT EXISTS (
+                           SELECT 1 FROM queue WHERE queue_name = ? AND status = 'running'
+                       )
+                       AND id = (
+                           SELECT MIN(id) FROM queue WHERE queue_name = ? AND status = 'waiting'
+                       )""",
+                    (datetime.now().isoformat(), my_pid, task_id, queue_name, queue_name),
                 )
-                if ctx:
-                    await ctx.info(log_fmt("Lock ACQUIRED. Starting execution."))
-                return task_id
 
-        await asyncio.sleep(POLL_INTERVAL_READY)
+                if cursor.rowcount > 0:
+                    wait_time = time.time() - queued_at
+                    log_metric(
+                        "task_started",
+                        task_id=task_id,
+                        queue_name=queue_name,
+                        wait_time_seconds=round(wait_time, 2),
+                    )
+                    if ctx:
+                        await ctx.info(log_fmt("Lock ACQUIRED. Starting execution."))
+                    return task_id
+
+            await asyncio.sleep(POLL_INTERVAL_READY)
+    except asyncio.CancelledError:
+        # Client disconnected (e.g., sub-agent cancelled) - clean up our queue entry
+        with _active_task_ids_lock:
+            _active_task_ids.discard(task_id)
+        log_metric(
+            "task_cancelled",
+            task_id=task_id,
+            queue_name=queue_name,
+            reason="client_disconnected",
+        )
+        with get_db() as conn:
+            conn.execute("DELETE FROM queue WHERE id = ?", (task_id,))
+        raise  # Re-raise to propagate cancellation
 
 
 async def release_lock(task_id: int):
     """Release a queue lock."""
+    # Remove from active tracking
+    with _active_task_ids_lock:
+        _active_task_ids.discard(task_id)
+
     ctx = None
     try:
         ctx = get_context()
@@ -469,6 +559,25 @@ async def run_task(
             tail = list(stderr_tail) if stderr_tail else list(stdout_tail)
             tail_text = "\n".join(tail) if tail else "(no output)"
             return f"FAILED exit={proc.returncode} {duration:.1f}s output={output_file}\n{tail_text}"
+
+    except asyncio.CancelledError:
+        # Client disconnected while task was running - kill the subprocess
+        log_metric(
+            "task_cancelled",
+            task_id=task_id,
+            queue_name=queue_name,
+            command=command,
+            reason="client_disconnected_during_execution",
+        )
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except Exception:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                pass
+        raise  # Re-raise to propagate cancellation
 
     except Exception as e:
         log_metric(

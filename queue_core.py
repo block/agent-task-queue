@@ -50,10 +50,16 @@ CREATE TABLE IF NOT EXISTS queue (
     queue_name TEXT NOT NULL,
     status TEXT NOT NULL,
     pid INTEGER,
+    server_id TEXT,
     child_pid INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
+"""
+
+# Migration to add server_id column to existing databases
+QUEUE_MIGRATION_SERVER_ID = """
+ALTER TABLE queue ADD COLUMN server_id TEXT
 """
 
 QUEUE_INDEX = """
@@ -85,6 +91,11 @@ def init_db(paths: QueuePaths):
     with get_db(paths.db_path) as conn:
         conn.execute(QUEUE_SCHEMA)
         conn.execute(QUEUE_INDEX)
+        # Run migration for existing databases without server_id column
+        try:
+            conn.execute(QUEUE_MIGRATION_SERVER_ID)
+        except sqlite3.OperationalError:
+            pass  # Column already exists
 
 
 def ensure_db(paths: QueuePaths):
@@ -114,6 +125,42 @@ def is_process_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
+
+
+def is_task_queue_process(pid: int) -> bool:
+    """Check if a PID is running our task_queue MCP server or tq CLI.
+
+    Returns True if:
+    - Process is dead (handled separately)
+    - Process command line contains 'task_queue' or 'agent-task-queue'
+
+    Returns False if process is alive but running something else (PID reused).
+    """
+    if not is_process_alive(pid):
+        return False
+
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "args="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return False
+
+        cmdline = result.stdout.strip().lower()
+        return (
+            "task_queue" in cmdline
+            or "agent-task-queue" in cmdline
+            or "tq.py" in cmdline
+            or "pytest" in cmdline  # For pytest running tests
+        )
+    except Exception:
+        # If we can't check, assume valid (conservative - avoid false orphan cleanup)
+        return True
 
 
 def kill_process_tree(pid: int):
@@ -198,7 +245,7 @@ def cleanup_queue(
     ).fetchall()
 
     for runner in runners:
-        if not is_process_alive(runner["pid"]):
+        if not is_task_queue_process(runner["pid"]):
             child = runner["child_pid"]
             if child and is_process_alive(child):
                 log(
@@ -224,7 +271,7 @@ def cleanup_queue(
     ).fetchall()
 
     for waiter in waiters:
-        if not is_process_alive(waiter["pid"]):
+        if not is_task_queue_process(waiter["pid"]):
             conn.execute("DELETE FROM queue WHERE id = ?", (waiter["id"],))
             log_metric(
                 metrics_path,

@@ -634,11 +634,12 @@ def test_zombie_cleanup_stale_lock():
 def test_zombie_cleanup_preserves_valid_tasks():
     """Test that cleanup doesn't remove valid running tasks."""
     import os
+    from task_queue import _active_task_ids, _active_task_ids_lock
 
     my_pid = os.getpid()  # Use our own PID so it's "alive"
 
     with get_db() as conn:
-        conn.execute(
+        cursor = conn.execute(
             """INSERT INTO queue (queue_name, status, pid, child_pid, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?)""",
             (
@@ -650,24 +651,32 @@ def test_zombie_cleanup_preserves_valid_tasks():
                 datetime.now().isoformat(),  # Recent timestamp
             ),
         )
+        task_id = cursor.lastrowid
 
-        # Verify the task exists
-        count_before = conn.execute(
-            "SELECT COUNT(*) as c FROM queue WHERE queue_name = 'valid_test'"
-        ).fetchone()["c"]
-        assert count_before == 1
+        # Register this task as active (simulating normal operation)
+        with _active_task_ids_lock:
+            _active_task_ids.add(task_id)
 
-        # Run cleanup
-        cleanup_queue(conn, "valid_test")
+        try:
+            # Verify the task exists
+            count_before = conn.execute(
+                "SELECT COUNT(*) as c FROM queue WHERE queue_name = 'valid_test'"
+            ).fetchone()["c"]
+            assert count_before == 1
 
-        # Verify the task is still there (not removed)
-        count_after = conn.execute(
-            "SELECT COUNT(*) as c FROM queue WHERE queue_name = 'valid_test'"
-        ).fetchone()["c"]
-        assert count_after == 1, "Valid running task should NOT be cleaned up"
+            # Run cleanup
+            cleanup_queue(conn, "valid_test")
 
-        # Clean up for other tests
-        conn.execute("DELETE FROM queue WHERE queue_name = 'valid_test'")
+            # Verify the task is still there (not removed)
+            count_after = conn.execute(
+                "SELECT COUNT(*) as c FROM queue WHERE queue_name = 'valid_test'"
+            ).fetchone()["c"]
+            assert count_after == 1, "Valid running task should NOT be cleaned up"
+        finally:
+            # Clean up for other tests
+            with _active_task_ids_lock:
+                _active_task_ids.discard(task_id)
+            conn.execute("DELETE FROM queue WHERE queue_name = 'valid_test'")
 
 
 def test_orphan_cleanup_dead_parent_waiting():
@@ -707,11 +716,12 @@ def test_orphan_cleanup_dead_parent_waiting():
 def test_orphan_cleanup_preserves_valid_waiting():
     """Test that cleanup doesn't remove valid waiting tasks."""
     import os
+    from task_queue import _active_task_ids, _active_task_ids_lock
 
     my_pid = os.getpid()  # Use our own PID so it's "alive"
 
     with get_db() as conn:
-        conn.execute(
+        cursor = conn.execute(
             """INSERT INTO queue (queue_name, status, pid, child_pid, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?)""",
             (
@@ -723,24 +733,124 @@ def test_orphan_cleanup_preserves_valid_waiting():
                 datetime.now().isoformat(),
             ),
         )
+        task_id = cursor.lastrowid
+
+        # Register this task as active (simulating normal operation)
+        with _active_task_ids_lock:
+            _active_task_ids.add(task_id)
+
+        try:
+            # Verify the task exists
+            count_before = conn.execute(
+                "SELECT COUNT(*) as c FROM queue WHERE queue_name = 'valid_waiting_test'"
+            ).fetchone()["c"]
+            assert count_before == 1
+
+            # Run cleanup
+            cleanup_queue(conn, "valid_waiting_test")
+
+            # Verify the task is still there (not removed)
+            count_after = conn.execute(
+                "SELECT COUNT(*) as c FROM queue WHERE queue_name = 'valid_waiting_test'"
+            ).fetchone()["c"]
+            assert count_after == 1, "Valid waiting task should NOT be cleaned up"
+        finally:
+            # Clean up for other tests
+            with _active_task_ids_lock:
+                _active_task_ids.discard(task_id)
+            conn.execute("DELETE FROM queue WHERE queue_name = 'valid_waiting_test'")
+
+
+def test_orphan_cleanup_removes_untracked_task():
+    """Test that cleanup removes tasks for our PID that aren't in the active set.
+
+    This tests the fix for orphaned tasks left behind when MCP clients
+    disconnect without proper cleanup (e.g., when sub-agents are cancelled).
+    """
+    import os
+    from task_queue import _active_task_ids, _active_task_ids_lock
+
+    my_pid = os.getpid()  # Use our own PID
+
+    with get_db() as conn:
+        cursor = conn.execute(
+            """INSERT INTO queue (queue_name, status, pid, child_pid, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                "untracked_orphan_test",
+                "waiting",
+                my_pid,
+                None,
+                datetime.now().isoformat(),
+                datetime.now().isoformat(),
+            ),
+        )
+        task_id = cursor.lastrowid
+
+        # Do NOT add to _active_task_ids - simulating an orphaned task
 
         # Verify the task exists
         count_before = conn.execute(
-            "SELECT COUNT(*) as c FROM queue WHERE queue_name = 'valid_waiting_test'"
+            "SELECT COUNT(*) as c FROM queue WHERE queue_name = 'untracked_orphan_test'"
         ).fetchone()["c"]
         assert count_before == 1
 
         # Run cleanup
-        cleanup_queue(conn, "valid_waiting_test")
+        cleanup_queue(conn, "untracked_orphan_test")
 
-        # Verify the task is still there (not removed)
+        # Verify the task was removed (it's orphaned - our PID but not tracked)
         count_after = conn.execute(
-            "SELECT COUNT(*) as c FROM queue WHERE queue_name = 'valid_waiting_test'"
+            "SELECT COUNT(*) as c FROM queue WHERE queue_name = 'untracked_orphan_test'"
         ).fetchone()["c"]
-        assert count_after == 1, "Valid waiting task should NOT be cleaned up"
+        assert count_after == 0, "Untracked task for our PID should be cleaned up"
 
-        # Clean up for other tests
-        conn.execute("DELETE FROM queue WHERE queue_name = 'valid_waiting_test'")
+
+def test_stale_server_instance_cleanup():
+    """Test that cleanup removes tasks from old server instances even if PID is reused.
+
+    This tests the fix for the edge case where:
+    1. MCP server A creates tasks with PID 1234 and server_id "abc123"
+    2. Server A dies
+    3. A new process reuses PID 1234
+    4. MCP server B starts with PID 1234 and server_id "xyz789"
+    5. Server B's cleanup should remove Server A's orphaned tasks
+    """
+    import os
+    from task_queue import SERVER_INSTANCE_ID
+
+    my_pid = os.getpid()
+    old_server_id = "old12345"  # Simulated old server instance
+
+    with get_db() as conn:
+        # Insert a task as if from an old server instance (same PID, different server_id)
+        cursor = conn.execute(
+            """INSERT INTO queue (queue_name, status, pid, server_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                "stale_server_test",
+                "running",
+                my_pid,  # Same PID as current process
+                old_server_id,  # Different server_id
+                datetime.now().isoformat(),
+                datetime.now().isoformat(),
+            ),
+        )
+        task_id = cursor.lastrowid
+
+        # Verify the task exists
+        count_before = conn.execute(
+            "SELECT COUNT(*) as c FROM queue WHERE queue_name = 'stale_server_test'"
+        ).fetchone()["c"]
+        assert count_before == 1
+
+        # Run cleanup
+        cleanup_queue(conn, "stale_server_test")
+
+        # Verify the task was removed (different server_id means it's from old instance)
+        count_after = conn.execute(
+            "SELECT COUNT(*) as c FROM queue WHERE queue_name = 'stale_server_test'"
+        ).fetchone()["c"]
+        assert count_after == 0, "Task from old server instance should be cleaned up"
 
 
 # --- Configuration Tests ---

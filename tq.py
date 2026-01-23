@@ -14,8 +14,13 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
+
+# Unique identifier for this CLI instance - used to detect orphaned tasks
+# from previous CLI instances even if the PID is reused
+CLI_INSTANCE_ID = str(uuid.uuid4())[:8]
 
 # Import shared queue infrastructure
 from queue_core import (
@@ -183,14 +188,39 @@ def cleanup_queue(conn, queue_name: str, paths: QueuePaths):
     """Clean up queue (wrapper for CLI)."""
     _cleanup_queue(conn, queue_name, paths.metrics_path, DEFAULT_MAX_LOCK_AGE_MINUTES)
 
+    # Additional cleanup: Tasks with our PID but DIFFERENT instance_id (from old CLI instance)
+    # This handles the edge case where PID is reused after CLI crash
+    my_pid = os.getpid()
+    stale_tasks = conn.execute(
+        "SELECT id, status, child_pid, server_id FROM queue WHERE queue_name = ? AND pid = ? AND server_id IS NOT NULL AND server_id != ?",
+        (queue_name, my_pid, CLI_INSTANCE_ID),
+    ).fetchall()
+
+    for task in stale_tasks:
+        if task["child_pid"] and is_process_alive(task["child_pid"]):
+            print(f"[tq] WARNING: Killing orphaned subprocess {task['child_pid']} from old CLI instance")
+            kill_process_tree(task["child_pid"])
+
+        conn.execute("DELETE FROM queue WHERE id = ?", (task["id"],))
+        log_metric(
+            paths,
+            "orphan_cleared",
+            task_id=task["id"],
+            queue_name=queue_name,
+            status=task["status"],
+            old_instance_id=task["server_id"],
+            reason="stale_cli_instance",
+        )
+        print(f"[tq] WARNING: Cleared task from old CLI instance (ID: {task['id']}, old_instance: {task['server_id']})")
+
 
 def register_task(conn, queue_name: str, paths: QueuePaths) -> int:
     """Register a task in the queue. Returns task_id immediately."""
     my_pid = os.getpid()
 
     cursor = conn.execute(
-        "INSERT INTO queue (queue_name, status, pid) VALUES (?, ?, ?)",
-        (queue_name, "waiting", my_pid),
+        "INSERT INTO queue (queue_name, status, pid, server_id) VALUES (?, ?, ?, ?)",
+        (queue_name, "waiting", my_pid, CLI_INSTANCE_ID),
     )
     conn.commit()
     task_id = cursor.lastrowid
@@ -329,6 +359,10 @@ def cmd_run(args):
     signal.signal(signal.SIGTERM, cleanup_handler)
 
     try:
+        # Run cleanup BEFORE inserting - this clears orphaned tasks that would otherwise
+        # block the queue forever (since cleanup only runs during polling)
+        cleanup_queue(conn, queue_name, paths)
+
         # Register task first so task_id is available for cleanup if interrupted
         task_id = register_task(conn, queue_name, paths)
         wait_for_turn(conn, queue_name, task_id, paths)

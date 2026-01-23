@@ -396,3 +396,148 @@ class TestSignalHandling:
             pass  # Expected - process is dead
 
         conn.close()
+
+    def test_multiple_waiters_cancelled(self, temp_data_dir):
+        """
+        Test that multiple waiting tasks are all cleaned up when cancelled.
+
+        Simulates the scenario where multiple sub-agents are cancelled at once.
+        """
+        import os
+        import signal
+        import sqlite3
+        import time
+
+        db_path = Path(temp_data_dir) / "queue.db"
+
+        # Start a blocker to hold the lock
+        blocker = subprocess.Popen(
+            [sys.executable, str(TQ_PATH), f"--data-dir={temp_data_dir}", "sleep", "30"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+
+        time.sleep(0.5)
+
+        # Start multiple waiters
+        waiters = []
+        for i in range(3):
+            waiter = subprocess.Popen(
+                [sys.executable, str(TQ_PATH), f"--data-dir={temp_data_dir}", "echo", f"waiter_{i}"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            waiters.append(waiter)
+            time.sleep(0.2)  # Stagger registration
+
+        # Verify all waiters are in queue
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        waiting_count = conn.execute(
+            "SELECT COUNT(*) as c FROM queue WHERE status = 'waiting'"
+        ).fetchone()["c"]
+        assert waiting_count == 3, f"Expected 3 waiting tasks, got {waiting_count}"
+
+        # Cancel all waiters simultaneously
+        for waiter in waiters:
+            waiter.send_signal(signal.SIGINT)
+
+        # Wait for all to exit
+        for waiter in waiters:
+            waiter.wait(timeout=5)
+
+        # Verify all waiting tasks were cleaned up
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        remaining = conn.execute(
+            "SELECT COUNT(*) as c FROM queue WHERE status = 'waiting'"
+        ).fetchone()["c"]
+        assert remaining == 0, f"All waiting tasks should be cleaned up, but {remaining} remain"
+
+        # Blocker should still be running
+        running = conn.execute("SELECT * FROM queue WHERE status = 'running'").fetchone()
+        assert running is not None, "Blocker should still be running"
+
+        # Clean up blocker
+        try:
+            os.killpg(os.getpgid(blocker.pid), signal.SIGTERM)
+        except Exception:
+            blocker.terminate()
+        blocker.wait(timeout=5)
+        conn.close()
+
+    def test_cancel_and_restart_proceeds(self, temp_data_dir):
+        """
+        Test that after cancelling tasks, new tasks can proceed normally.
+
+        This verifies the queue isn't left in a broken state after cancellation.
+        """
+        import os
+        import signal
+        import sqlite3
+        import time
+
+        db_path = Path(temp_data_dir) / "queue.db"
+
+        # Start and cancel a task
+        proc = subprocess.Popen(
+            [sys.executable, str(TQ_PATH), f"--data-dir={temp_data_dir}", "sleep", "30"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        time.sleep(0.5)
+
+        # Cancel it
+        proc.send_signal(signal.SIGINT)
+        proc.wait(timeout=5)
+
+        # Verify queue is empty
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        count = conn.execute("SELECT COUNT(*) as c FROM queue").fetchone()["c"]
+        assert count == 0, "Queue should be empty after cancellation"
+        conn.close()
+
+        # Now run a new task - it should succeed
+        result = run_tq("echo", "after_cancel", data_dir=temp_data_dir)
+        assert result.returncode == 0, "New task should succeed after cancellation"
+        assert "[tq] SUCCESS" in result.stdout
+
+    def test_rapid_cancel_restart_cycles(self, temp_data_dir):
+        """
+        Stress test: rapidly cancel and restart tasks.
+
+        Ensures no race conditions or leaked queue entries.
+        """
+        import os
+        import signal
+        import sqlite3
+        import time
+
+        db_path = Path(temp_data_dir) / "queue.db"
+
+        # Run several cancel/restart cycles
+        for cycle in range(5):
+            proc = subprocess.Popen(
+                [sys.executable, str(TQ_PATH), f"--data-dir={temp_data_dir}", "sleep", "10"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            time.sleep(0.3)  # Let it register
+            proc.send_signal(signal.SIGINT)
+            proc.wait(timeout=5)
+
+        # Queue should be empty
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        count = conn.execute("SELECT COUNT(*) as c FROM queue").fetchone()["c"]
+        assert count == 0, f"Queue should be empty after {5} cancel cycles, but has {count} entries"
+        conn.close()
+
+        # Final task should work
+        result = run_tq("echo", "final", data_dir=temp_data_dir)
+        assert result.returncode == 0, "Final task should succeed"
