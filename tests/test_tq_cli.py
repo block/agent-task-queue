@@ -300,7 +300,7 @@ class TestSignalHandling:
         conn.row_factory = sqlite3.Row
         running = conn.execute("SELECT * FROM queue WHERE status = 'running'").fetchone()
         assert running is not None, "Blocker should be running"
-        blocker_task_id = running["id"]
+        _ = running["id"]  # blocker_task_id - not used but verifies task exists
 
         # Now start a second task that will wait in queue
         waiter = subprocess.Popen(
@@ -474,7 +474,6 @@ class TestSignalHandling:
 
         This verifies the queue isn't left in a broken state after cancellation.
         """
-        import os
         import signal
         import sqlite3
         import time
@@ -512,7 +511,6 @@ class TestSignalHandling:
 
         Ensures no race conditions or leaked queue entries.
         """
-        import os
         import signal
         import sqlite3
         import time

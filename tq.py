@@ -18,10 +18,6 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-# Unique identifier for this CLI instance - used to detect orphaned tasks
-# from previous CLI instances even if the PID is reused
-CLI_INSTANCE_ID = str(uuid.uuid4())[:8]
-
 # Import shared queue infrastructure
 from queue_core import (
     QueuePaths,
@@ -37,6 +33,10 @@ from queue_core import (
     DEFAULT_MAX_LOCK_AGE_MINUTES,
     DEFAULT_MAX_METRICS_SIZE_MB,
 )
+
+# Unique identifier for this CLI instance - used to detect orphaned tasks
+# from previous CLI instances even if the PID is reused
+CLI_INSTANCE_ID = str(uuid.uuid4())[:8]
 
 
 def get_paths(args) -> QueuePaths:

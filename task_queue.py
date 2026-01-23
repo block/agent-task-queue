@@ -22,15 +22,6 @@ from pathlib import Path
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_context
 
-# Unique identifier for this server instance - used to detect orphaned tasks
-# from previous server instances even if the PID is reused
-SERVER_INSTANCE_ID = str(uuid.uuid4())[:8]
-
-# Track active task IDs being processed by this server instance
-# Used to detect orphaned queue entries when clients disconnect without proper cleanup
-_active_task_ids: set[int] = set()
-_active_task_ids_lock = threading.Lock()
-
 # Import shared queue infrastructure
 from queue_core import (
     QueuePaths,
@@ -45,6 +36,15 @@ from queue_core import (
     POLL_INTERVAL_WAITING,
     POLL_INTERVAL_READY,
 )
+
+# Unique identifier for this server instance - used to detect orphaned tasks
+# from previous server instances even if the PID is reused
+SERVER_INSTANCE_ID = str(uuid.uuid4())[:8]
+
+# Track active task IDs being processed by this server instance
+# Used to detect orphaned queue entries when clients disconnect without proper cleanup
+_active_task_ids: set[int] = set()
+_active_task_ids_lock = threading.Lock()
 
 
 # --- Argument Parsing ---

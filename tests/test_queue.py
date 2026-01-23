@@ -768,12 +768,11 @@ def test_orphan_cleanup_removes_untracked_task():
     disconnect without proper cleanup (e.g., when sub-agents are cancelled).
     """
     import os
-    from task_queue import _active_task_ids, _active_task_ids_lock
 
     my_pid = os.getpid()  # Use our own PID
 
     with get_db() as conn:
-        cursor = conn.execute(
+        conn.execute(
             """INSERT INTO queue (queue_name, status, pid, child_pid, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?)""",
             (
@@ -785,7 +784,6 @@ def test_orphan_cleanup_removes_untracked_task():
                 datetime.now().isoformat(),
             ),
         )
-        task_id = cursor.lastrowid
 
         # Do NOT add to _active_task_ids - simulating an orphaned task
 
@@ -816,14 +814,13 @@ def test_stale_server_instance_cleanup():
     5. Server B's cleanup should remove Server A's orphaned tasks
     """
     import os
-    from task_queue import SERVER_INSTANCE_ID
 
     my_pid = os.getpid()
     old_server_id = "old12345"  # Simulated old server instance
 
     with get_db() as conn:
         # Insert a task as if from an old server instance (same PID, different server_id)
-        cursor = conn.execute(
+        conn.execute(
             """INSERT INTO queue (queue_name, status, pid, server_id, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?)""",
             (
@@ -835,7 +832,6 @@ def test_stale_server_instance_cleanup():
                 datetime.now().isoformat(),
             ),
         )
-        task_id = cursor.lastrowid
 
         # Verify the task exists
         count_before = conn.execute(
