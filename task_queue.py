@@ -8,17 +8,43 @@ heavy task runs at a time per queue.
 
 import argparse
 import asyncio
-import json
 import os
+import resource
 import signal
 import sqlite3
 import time
-from contextlib import contextmanager
-from datetime import datetime, timedelta
+import threading
+import uuid
+from collections import deque
+from datetime import datetime
 from pathlib import Path
 
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_context
+
+# Import shared queue infrastructure
+from queue_core import (
+    QueuePaths,
+    get_db as _get_db,
+    init_db as _init_db,
+    ensure_db as _ensure_db,
+    cleanup_queue as _cleanup_queue,
+    log_metric as _log_metric,
+    log_fmt,
+    is_process_alive,
+    kill_process_tree,
+    POLL_INTERVAL_WAITING,
+    POLL_INTERVAL_READY,
+)
+
+# Unique identifier for this server instance - used to detect orphaned tasks
+# from previous server instances even if the PID is reused
+SERVER_INSTANCE_ID = str(uuid.uuid4())[:8]
+
+# Track active task IDs being processed by this server instance
+# Used to detect orphaned queue entries when clients disconnect without proper cleanup
+_active_task_ids: set[int] = set()
+_active_task_ids_lock = threading.Lock()
 
 
 # --- Argument Parsing ---
@@ -69,91 +95,103 @@ _args = parse_args() if __name__ == "__main__" else argparse.Namespace(
 )
 
 # --- Configuration ---
-DATA_DIR = Path(_args.data_dir)
-OUTPUT_DIR = DATA_DIR / "output"
-DB_PATH = DATA_DIR / "queue.db"
-METRICS_PATH = DATA_DIR / "agent-task-queue-logs.json"
+PATHS = QueuePaths.from_data_dir(Path(_args.data_dir))
+OUTPUT_DIR = PATHS.output_dir
 MAX_METRICS_SIZE_MB = _args.max_log_size
 MAX_OUTPUT_FILES = _args.max_output_files
 TAIL_LINES_ON_FAILURE = _args.tail_lines
 SERVER_NAME = "Task Queue"
 MAX_LOCK_AGE_MINUTES = _args.lock_timeout
 
-# Polling intervals (configurable via environment)
-POLL_INTERVAL_WAITING = float(os.environ.get("TASK_QUEUE_POLL_WAITING", "1"))
-POLL_INTERVAL_READY = float(os.environ.get("TASK_QUEUE_POLL_READY", "1"))
-
 mcp = FastMCP(SERVER_NAME)
 
 
-# --- Database & Logging ---
-@contextmanager
+# --- Wrappers for shared functions (use module-level paths) ---
 def get_db():
-    """Get database connection with WAL mode for better concurrency."""
-    conn = sqlite3.connect(DB_PATH, timeout=60.0)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=60000")
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    """Get database connection using configured path."""
+    return _get_db(PATHS.db_path)
 
 
 def init_db():
-    """Initialize DB with PID columns for process tracking."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with get_db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS queue (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                queue_name TEXT NOT NULL,
-                status TEXT NOT NULL,
-                pid INTEGER,
-                child_pid INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_queue_status
-            ON queue(queue_name, status)
-        """)
+    """Initialize database using configured paths."""
+    _init_db(PATHS)
 
 
-def log_fmt(msg: str) -> str:
-    """Format log message with timestamp."""
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    return f"[{timestamp}] [TASK-QUEUE] {msg}"
+def ensure_db():
+    """Ensure database exists and is valid using configured paths."""
+    _ensure_db(PATHS)
 
 
 def log_metric(event: str, **kwargs):
-    """
-    Append a JSON metric entry to the log file.
-    Rotates log file when it exceeds MAX_METRICS_SIZE_MB.
-    """
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Rotate if file exceeds size limit
-    if METRICS_PATH.exists():
-        size_mb = METRICS_PATH.stat().st_size / (1024 * 1024)
-        if size_mb > MAX_METRICS_SIZE_MB:
-            rotated = METRICS_PATH.with_suffix(".json.1")
-            METRICS_PATH.rename(rotated)
-
-    entry = {
-        "event": event,
-        "timestamp": datetime.now().isoformat(),
-        **kwargs,
-    }
-    with open(METRICS_PATH, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+    """Log metric using configured paths."""
+    PATHS.data_dir.mkdir(parents=True, exist_ok=True)
+    _log_metric(PATHS.metrics_path, event, MAX_METRICS_SIZE_MB, **kwargs)
 
 
+def cleanup_queue(conn, queue_name: str):
+    """Clean up queue using configured paths and detect orphaned tasks."""
+    _cleanup_queue(
+        conn,
+        queue_name,
+        PATHS.metrics_path,
+        MAX_LOCK_AGE_MINUTES,
+        log_fn=lambda msg: print(log_fmt(msg)),
+    )
+
+    my_pid = os.getpid()
+
+    # Cleanup 1: Tasks with our PID but DIFFERENT server_id (from old server instance)
+    # This handles the edge case where PID is reused after server restart
+    stale_server_tasks = conn.execute(
+        "SELECT id, status, child_pid, server_id FROM queue WHERE queue_name = ? AND pid = ? AND server_id IS NOT NULL AND server_id != ?",
+        (queue_name, my_pid, SERVER_INSTANCE_ID),
+    ).fetchall()
+
+    for task in stale_server_tasks:
+        if task["child_pid"] and is_process_alive(task["child_pid"]):
+            print(log_fmt(f"WARNING: Killing orphaned subprocess {task['child_pid']} from old server"))
+            kill_process_tree(task["child_pid"])
+
+        conn.execute("DELETE FROM queue WHERE id = ?", (task["id"],))
+        log_metric(
+            "orphan_cleared",
+            task_id=task["id"],
+            queue_name=queue_name,
+            status=task["status"],
+            old_server_id=task["server_id"],
+            reason="stale_server_instance",
+        )
+        print(log_fmt(f"WARNING: Cleared task from old server instance (ID: {task['id']}, old_server: {task['server_id']})"))
+
+    # Cleanup 2: Tasks with our PID AND server_id but not in active tracking set
+    # This catches tasks left behind when clients disconnect without proper cleanup
+    our_tasks = conn.execute(
+        "SELECT id, status, child_pid FROM queue WHERE queue_name = ? AND pid = ? AND (server_id = ? OR server_id IS NULL)",
+        (queue_name, my_pid, SERVER_INSTANCE_ID),
+    ).fetchall()
+
+    with _active_task_ids_lock:
+        active_ids = _active_task_ids.copy()
+
+    for orphan in our_tasks:
+        if orphan["id"] not in active_ids:
+            # This task belongs to us but we're not tracking it - it's orphaned
+            if orphan["child_pid"] and is_process_alive(orphan["child_pid"]):
+                print(log_fmt(f"WARNING: Killing orphaned subprocess {orphan['child_pid']}"))
+                kill_process_tree(orphan["child_pid"])
+
+            conn.execute("DELETE FROM queue WHERE id = ?", (orphan["id"],))
+            log_metric(
+                "orphan_cleared",
+                task_id=orphan["id"],
+                queue_name=queue_name,
+                status=orphan["status"],
+                reason="not_in_active_set",
+            )
+            print(log_fmt(f"WARNING: Cleared orphaned task (ID: {orphan['id']}, status: {orphan['status']})"))
+
+
+# --- Output File Management ---
 def cleanup_output_files():
     """Remove oldest output files if over MAX_OUTPUT_FILES limit."""
     if not OUTPUT_DIR.exists():
@@ -183,115 +221,25 @@ def clear_output_files() -> int:
     return count
 
 
-# --- Process Liveness Logic ---
-def is_process_alive(pid: int) -> bool:
-    """Check if a process ID exists on the host OS."""
-    if pid is None:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-
-def kill_process_tree(pid: int):
-    """Kill a process and all its children by killing the process group."""
-    if not pid or not is_process_alive(pid):
-        return
-    try:
-        # Kill the entire process group (works because we use start_new_session=True)
-        os.killpg(pid, signal.SIGTERM)
-    except OSError:
-        # Fallback: try killing just the process if process group kill fails
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-
-
-def cleanup_queue(conn, queue_name: str):
-    """
-    Active Cleanup:
-    1. Check if MCP server holding lock is alive
-    2. If not, kill orphaned child process
-    3. Check for timeouts
-    """
-    # Check for dead parents
-    runners = conn.execute(
-        "SELECT id, pid, child_pid FROM queue WHERE queue_name = ? AND status = 'running'",
-        (queue_name,),
-    ).fetchall()
-
-    for runner in runners:
-        if not is_process_alive(runner["pid"]):
-            child = runner["child_pid"]
-            if child and is_process_alive(child):
-                print(
-                    log_fmt(
-                        f"WARNING: Parent PID {runner['pid']} died. Killing orphan child PID {child}..."
-                    )
-                )
-                kill_process_tree(child)
-
-            conn.execute("DELETE FROM queue WHERE id = ?", (runner["id"],))
-            log_metric(
-                "zombie_cleared",
-                task_id=runner["id"],
-                queue_name=queue_name,
-                dead_pid=runner["pid"],
-                reason="parent_died",
-            )
-            print(log_fmt(f"WARNING: Cleared zombie lock (ID: {runner['id']})."))
-
-    # Check for timeouts
-    cutoff = (datetime.now() - timedelta(minutes=MAX_LOCK_AGE_MINUTES)).isoformat()
-    stale = conn.execute(
-        "SELECT id, child_pid FROM queue WHERE queue_name = ? AND status = 'running' AND updated_at < ?",
-        (queue_name, cutoff),
-    ).fetchall()
-
-    for task in stale:
-        if task["child_pid"]:
-            kill_process_tree(task["child_pid"])
-        conn.execute("DELETE FROM queue WHERE id = ?", (task["id"],))
-        log_metric(
-            "zombie_cleared",
-            task_id=task["id"],
-            queue_name=queue_name,
-            reason="timeout",
-            timeout_minutes=MAX_LOCK_AGE_MINUTES,
-        )
-        print(
-            log_fmt(
-                f"WARNING: Cleared stale lock (ID: {task['id']}) active > {MAX_LOCK_AGE_MINUTES}m"
-            )
-        )
+def get_memory_mb() -> float:
+    """Get current process memory usage in MB (RSS - resident set size)."""
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    # ru_maxrss is in bytes on Linux, kilobytes on macOS
+    if os.uname().sysname == "Darwin":
+        return usage.ru_maxrss / (1024 * 1024)  # KB to MB
+    return usage.ru_maxrss / 1024  # bytes to MB on Linux
 
 
 # --- Core Queue Logic ---
-def ensure_db():
-    """Ensure database exists and is valid. Recreates if corrupted."""
-    try:
-        with get_db() as conn:
-            # Quick check that table exists
-            conn.execute("SELECT 1 FROM queue LIMIT 1")
-    except sqlite3.OperationalError:
-        # Database missing or corrupted - clean up and reinitialize
-        for suffix in ["", "-wal", "-shm"]:
-            path = Path(str(DB_PATH) + suffix)
-            if path.exists():
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
-        init_db()
-
-
 async def wait_for_turn(queue_name: str) -> int:
     """Register task, wait for turn, return task ID when acquired."""
     # Ensure database exists and is valid
     ensure_db()
+
+    # Run cleanup BEFORE inserting - this clears orphaned tasks that would otherwise
+    # block the queue forever (since cleanup only runs during polling)
+    with get_db() as conn:
+        cleanup_queue(conn, queue_name)
 
     my_pid = os.getpid()
     ctx = None
@@ -302,10 +250,14 @@ async def wait_for_turn(queue_name: str) -> int:
 
     with get_db() as conn:
         cursor = conn.execute(
-            "INSERT INTO queue (queue_name, status, pid) VALUES (?, ?, ?)",
-            (queue_name, "waiting", my_pid),
+            "INSERT INTO queue (queue_name, status, pid, server_id) VALUES (?, ?, ?, ?)",
+            (queue_name, "waiting", my_pid, SERVER_INSTANCE_ID),
         )
         task_id = cursor.lastrowid
+
+    # Track this task as active for orphan detection
+    with _active_task_ids_lock:
+        _active_task_ids.add(task_id)
 
     log_metric("task_queued", task_id=task_id, queue_name=queue_name, pid=my_pid)
     queued_at = time.time()
@@ -318,72 +270,90 @@ async def wait_for_turn(queue_name: str) -> int:
     last_pos = -1
     wait_ticks = 0
 
-    while True:
-        with get_db() as conn:
-            cleanup_queue(conn, queue_name)
+    try:
+        while True:
+            with get_db() as conn:
+                cleanup_queue(conn, queue_name)
 
-            runner = conn.execute(
-                "SELECT id FROM queue WHERE queue_name = ? AND status = 'running'",
-                (queue_name,),
-            ).fetchone()
+                runner = conn.execute(
+                    "SELECT id FROM queue WHERE queue_name = ? AND status = 'running'",
+                    (queue_name,),
+                ).fetchone()
 
-            if runner:
-                pos = (
-                    conn.execute(
-                        "SELECT COUNT(*) as c FROM queue WHERE queue_name = ? AND status = 'waiting' AND id < ?",
-                        (queue_name, task_id),
-                    ).fetchone()["c"]
-                    + 1
-                )
-
-                wait_ticks += 1
-
-                if pos != last_pos:
-                    if ctx:
-                        await ctx.info(log_fmt(f"Position #{pos} in queue. Waiting..."))
-                    last_pos = pos
-                elif wait_ticks % 3 == 0 and ctx:  # Update every ~15 seconds
-                    await ctx.info(
-                        log_fmt(
-                            f"Still waiting... Position #{pos} ({wait_ticks * 5}s elapsed)"
-                        )
+                if runner:
+                    pos = (
+                        conn.execute(
+                            "SELECT COUNT(*) as c FROM queue WHERE queue_name = ? AND status = 'waiting' AND id < ?",
+                            (queue_name, task_id),
+                        ).fetchone()["c"]
+                        + 1
                     )
 
-                await asyncio.sleep(POLL_INTERVAL_WAITING)
-                continue
+                    wait_ticks += 1
 
-            # Atomic lock acquisition: UPDATE only succeeds if we're the first
-            # waiting task AND no one is currently running. This prevents race
-            # conditions where two tasks both think they're next.
-            cursor = conn.execute(
-                """UPDATE queue SET status = 'running', updated_at = ?, pid = ?
-                   WHERE id = ? AND status = 'waiting'
-                   AND NOT EXISTS (
-                       SELECT 1 FROM queue WHERE queue_name = ? AND status = 'running'
-                   )
-                   AND id = (
-                       SELECT MIN(id) FROM queue WHERE queue_name = ? AND status = 'waiting'
-                   )""",
-                (datetime.now().isoformat(), my_pid, task_id, queue_name, queue_name),
-            )
+                    if pos != last_pos:
+                        if ctx:
+                            await ctx.info(log_fmt(f"Position #{pos} in queue. Waiting..."))
+                        last_pos = pos
+                    elif wait_ticks % 10 == 0 and ctx:  # Update every ~10 polls
+                        await ctx.info(
+                            log_fmt(
+                                f"Still waiting... Position #{pos} ({int(wait_ticks * POLL_INTERVAL_WAITING)}s elapsed)"
+                            )
+                        )
 
-            if cursor.rowcount > 0:
-                wait_time = time.time() - queued_at
-                log_metric(
-                    "task_started",
-                    task_id=task_id,
-                    queue_name=queue_name,
-                    wait_time_seconds=round(wait_time, 2),
+                    await asyncio.sleep(POLL_INTERVAL_WAITING)
+                    continue
+
+                # Atomic lock acquisition: UPDATE only succeeds if we're the first
+                # waiting task AND no one is currently running. This prevents race
+                # conditions where two tasks both think they're next.
+                cursor = conn.execute(
+                    """UPDATE queue SET status = 'running', updated_at = ?, pid = ?
+                       WHERE id = ? AND status = 'waiting'
+                       AND NOT EXISTS (
+                           SELECT 1 FROM queue WHERE queue_name = ? AND status = 'running'
+                       )
+                       AND id = (
+                           SELECT MIN(id) FROM queue WHERE queue_name = ? AND status = 'waiting'
+                       )""",
+                    (datetime.now().isoformat(), my_pid, task_id, queue_name, queue_name),
                 )
-                if ctx:
-                    await ctx.info(log_fmt("Lock ACQUIRED. Starting execution."))
-                return task_id
 
-        await asyncio.sleep(POLL_INTERVAL_READY)
+                if cursor.rowcount > 0:
+                    wait_time = time.time() - queued_at
+                    log_metric(
+                        "task_started",
+                        task_id=task_id,
+                        queue_name=queue_name,
+                        wait_time_seconds=round(wait_time, 2),
+                    )
+                    if ctx:
+                        await ctx.info(log_fmt("Lock ACQUIRED. Starting execution."))
+                    return task_id
+
+            await asyncio.sleep(POLL_INTERVAL_READY)
+    except asyncio.CancelledError:
+        # Client disconnected (e.g., sub-agent cancelled) - clean up our queue entry
+        with _active_task_ids_lock:
+            _active_task_ids.discard(task_id)
+        log_metric(
+            "task_cancelled",
+            task_id=task_id,
+            queue_name=queue_name,
+            reason="client_disconnected",
+        )
+        with get_db() as conn:
+            conn.execute("DELETE FROM queue WHERE id = ?", (task_id,))
+        raise  # Re-raise to propagate cancellation
 
 
 async def release_lock(task_id: int):
     """Release a queue lock."""
+    # Remove from active tracking
+    with _active_task_ids_lock:
+        _active_task_ids.discard(task_id)
+
     ctx = None
     try:
         ctx = get_context()
@@ -471,13 +441,24 @@ async def run_task(
                 env[key.strip()] = value.strip()
 
     task_id = await wait_for_turn(queue_name)
+    mem_before = get_memory_mb()
 
     start = time.time()
-    stdout_lines = []
-    stderr_lines = []
+    # Use bounded deques - only keep last N lines in memory for error messages
+    stdout_tail: deque = deque(maxlen=TAIL_LINES_ON_FAILURE)
+    stderr_tail: deque = deque(maxlen=TAIL_LINES_ON_FAILURE)
+    stdout_count = 0
+    stderr_count = 0
+
+    # Create output file early and stream directly to it
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_file = OUTPUT_DIR / f"task_{task_id}.log"
 
     try:
-        proc = await asyncio.create_subprocess_shell(
+        # nosec B602: shell execution is intentional - this MCP tool executes user-provided
+        # build commands (gradle, docker, pytest, etc.). Shell features (pipes, redirects,
+        # globs) are required. Input comes from AI agents which users explicitly invoke.
+        proc = await asyncio.create_subprocess_shell(  # nosec B602
             command,
             cwd=working_directory,
             env=env,
@@ -492,98 +473,114 @@ async def run_task(
                 "UPDATE queue SET child_pid = ? WHERE id = ?", (proc.pid, task_id)
             )
 
-        async def stream_output(stream, lines: list):
-            """Read lines from stream (no real-time streaming to save tokens)."""
-            while True:
-                line = await stream.readline()
-                if not line:
-                    break
-                lines.append(line.decode().rstrip())
+        # Open file for streaming output - write header first
+        with open(output_file, "w") as f:
+            f.write(f"COMMAND: {command}\n")
+            f.write(f"WORKING DIR: {working_directory}\n")
+            f.write(f"STARTED: {datetime.now().isoformat()}\n")
+            f.write("\n--- STDOUT ---\n")
 
-        try:
-            # Collect stdout and stderr concurrently (no streaming to save tokens)
-            await asyncio.wait_for(
-                asyncio.gather(
-                    stream_output(proc.stdout, stdout_lines),
-                    stream_output(proc.stderr, stderr_lines),
-                ),
-                timeout=timeout_seconds,
-            )
-            await proc.wait()
-            duration = time.time() - start
+            async def stream_to_file(stream, tail_buffer: deque, label: str):
+                """Stream output directly to file, keeping only tail in memory."""
+                nonlocal stdout_count, stderr_count
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    decoded = line.decode().rstrip()
+                    f.write(decoded + "\n")
+                    f.flush()  # Ensure immediate write to disk
+                    tail_buffer.append(decoded)
+                    if label == "stdout":
+                        stdout_count += 1
+                    else:
+                        stderr_count += 1
 
-            log_metric(
-                "task_completed",
-                task_id=task_id,
-                queue_name=queue_name,
-                command=command,
-                exit_code=proc.returncode,
-                duration_seconds=round(duration, 2),
-                stdout_lines=len(stdout_lines),
-                stderr_lines=len(stderr_lines),
-            )
+            try:
+                # Stream stdout first, then stderr (written sequentially to file)
+                await asyncio.wait_for(
+                    stream_to_file(proc.stdout, stdout_tail, "stdout"),
+                    timeout=timeout_seconds,
+                )
+                f.write("\n--- STDERR ---\n")
+                await asyncio.wait_for(
+                    stream_to_file(proc.stderr, stderr_tail, "stderr"),
+                    timeout=timeout_seconds,
+                )
+                await proc.wait()
+                duration = time.time() - start
 
-            # Write full output to file
-            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-            output_file = OUTPUT_DIR / f"task_{task_id}.log"
-            with open(output_file, "w") as f:
-                f.write(f"COMMAND: {command}\n")
+                # Append summary to file
+                f.write("\n--- SUMMARY ---\n")
                 f.write(f"EXIT CODE: {proc.returncode}\n")
                 f.write(f"DURATION: {duration:.1f}s\n")
-                f.write(f"WORKING DIR: {working_directory}\n")
-                f.write("\n--- STDOUT ---\n")
-                f.write("\n".join(stdout_lines))
-                f.write("\n\n--- STDERR ---\n")
-                f.write("\n".join(stderr_lines))
-            cleanup_output_files()
 
-            # Return concise summary for agents
-            if proc.returncode == 0:
-                return f"SUCCESS exit=0 {duration:.1f}s output={output_file}"
-            else:
-                # On failure, include tail of output for context
-                tail = (
-                    stderr_lines[-TAIL_LINES_ON_FAILURE:]
-                    if stderr_lines
-                    else stdout_lines[-TAIL_LINES_ON_FAILURE:]
+            except asyncio.TimeoutError:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    await proc.wait()
+                except Exception:
+                    pass
+                f.write("\n--- SUMMARY ---\n")
+                f.write(f"EXIT CODE: TIMEOUT (killed after {timeout_seconds}s)\n")
+
+                log_metric(
+                    "task_timeout",
+                    task_id=task_id,
+                    queue_name=queue_name,
+                    command=command,
+                    timeout_seconds=timeout_seconds,
+                    memory_mb=round(get_memory_mb(), 1),
                 )
-                tail_text = "\n".join(tail) if tail else "(no output)"
-                return f"FAILED exit={proc.returncode} {duration:.1f}s output={output_file}\n{tail_text}"
+                cleanup_output_files()
 
-        except asyncio.TimeoutError:
+                tail = list(stderr_tail) if stderr_tail else list(stdout_tail)
+                tail_text = "\n".join(tail) if tail else "(no output)"
+                return f"TIMEOUT killed after {timeout_seconds}s output={output_file}\n{tail_text}"
+
+        # File is now closed, log metrics
+        mem_after = get_memory_mb()
+        log_metric(
+            "task_completed",
+            task_id=task_id,
+            queue_name=queue_name,
+            command=command,
+            exit_code=proc.returncode,
+            duration_seconds=round(duration, 2),
+            stdout_lines=stdout_count,
+            stderr_lines=stderr_count,
+            memory_before_mb=round(mem_before, 1),
+            memory_after_mb=round(mem_after, 1),
+        )
+        cleanup_output_files()
+
+        # Return concise summary for agents
+        if proc.returncode == 0:
+            return f"SUCCESS exit=0 {duration:.1f}s output={output_file}"
+        else:
+            # On failure, include tail of output for context
+            tail = list(stderr_tail) if stderr_tail else list(stdout_tail)
+            tail_text = "\n".join(tail) if tail else "(no output)"
+            return f"FAILED exit={proc.returncode} {duration:.1f}s output={output_file}\n{tail_text}"
+
+    except asyncio.CancelledError:
+        # Client disconnected while task was running - kill the subprocess
+        log_metric(
+            "task_cancelled",
+            task_id=task_id,
+            queue_name=queue_name,
+            command=command,
+            reason="client_disconnected_during_execution",
+        )
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except Exception:
             try:
-                # Kill entire process group to ensure all child processes die
                 os.killpg(proc.pid, signal.SIGKILL)
-                await proc.wait()
             except Exception:
                 pass
-            log_metric(
-                "task_timeout",
-                task_id=task_id,
-                queue_name=queue_name,
-                command=command,
-                timeout_seconds=timeout_seconds,
-            )
-            # Write partial output to file
-            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-            output_file = OUTPUT_DIR / f"task_{task_id}.log"
-            with open(output_file, "w") as f:
-                f.write(f"COMMAND: {command}\n")
-                f.write(f"EXIT CODE: TIMEOUT (killed after {timeout_seconds}s)\n")
-                f.write(f"WORKING DIR: {working_directory}\n")
-                f.write("\n--- STDOUT ---\n")
-                f.write("\n".join(stdout_lines))
-                f.write("\n\n--- STDERR ---\n")
-                f.write("\n".join(stderr_lines))
-            cleanup_output_files()
-
-            tail = (
-                stderr_lines[-TAIL_LINES_ON_FAILURE:]
-                if stderr_lines
-                else stdout_lines[-TAIL_LINES_ON_FAILURE:]
-            )
-            tail_text = "\n".join(tail) if tail else "(no output)"
-            return f"TIMEOUT killed after {timeout_seconds}s output={output_file}\n{tail_text}"
+        raise  # Re-raise to propagate cancellation
 
     except Exception as e:
         log_metric(

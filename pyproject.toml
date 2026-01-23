@@ -30,4 +30,4 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]
-only-include = ["task_queue.py", "tq.py"]
+only-include = ["task_queue.py", "tq.py", "queue_core.py"]
