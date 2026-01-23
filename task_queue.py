@@ -455,7 +455,10 @@ async def run_task(
     output_file = OUTPUT_DIR / f"task_{task_id}.log"
 
     try:
-        proc = await asyncio.create_subprocess_shell(
+        # nosec B602: shell execution is intentional - this MCP tool executes user-provided
+        # build commands (gradle, docker, pytest, etc.). Shell features (pipes, redirects,
+        # globs) are required. Input comes from AI agents which users explicitly invoke.
+        proc = await asyncio.create_subprocess_shell(  # nosec B602
             command,
             cwd=working_directory,
             env=env,

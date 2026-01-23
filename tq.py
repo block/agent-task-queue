@@ -375,9 +375,12 @@ def cmd_run(args):
 
         # Run subprocess in passthrough mode - direct terminal connection
         # This preserves rich output (progress bars, colors, etc.)
+        # nosec B602: shell=True is intentional - this CLI tool executes user-provided
+        # commands, similar to bash -c or make. Users control their own CLI arguments.
+        # Shell features (pipes, redirects, globs) are required for build commands.
         proc = subprocess.Popen(
             command,
-            shell=True,
+            shell=True,  # nosec B602
             cwd=working_dir,
             start_new_session=True,  # For clean process group kill
         )
