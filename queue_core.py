@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS queue (
     pid INTEGER,
     server_id TEXT,
     child_pid INTEGER,
+    command TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
@@ -60,6 +61,11 @@ CREATE TABLE IF NOT EXISTS queue (
 # Migration to add server_id column to existing databases
 QUEUE_MIGRATION_SERVER_ID = """
 ALTER TABLE queue ADD COLUMN server_id TEXT
+"""
+
+# Migration to add command column to existing databases
+QUEUE_MIGRATION_COMMAND = """
+ALTER TABLE queue ADD COLUMN command TEXT
 """
 
 QUEUE_INDEX = """
@@ -91,11 +97,12 @@ def init_db(paths: QueuePaths):
     with get_db(paths.db_path) as conn:
         conn.execute(QUEUE_SCHEMA)
         conn.execute(QUEUE_INDEX)
-        # Run migration for existing databases without server_id column
-        try:
-            conn.execute(QUEUE_MIGRATION_SERVER_ID)
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        # Run migrations for existing databases
+        for migration in [QUEUE_MIGRATION_SERVER_ID, QUEUE_MIGRATION_COMMAND]:
+            try:
+                conn.execute(migration)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
 
 def ensure_db(paths: QueuePaths):

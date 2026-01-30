@@ -51,10 +51,14 @@ def get_paths(args) -> QueuePaths:
 def cmd_list(args):
     """List all tasks in the queue."""
     paths = get_paths(args)
+    json_output = getattr(args, "json", False)
 
     if not paths.db_path.exists():
-        print(f"No queue database found at {paths.db_path}")
-        print("Queue is empty (no tasks have been run yet)")
+        if json_output:
+            print(json.dumps({"tasks": [], "summary": {"total": 0, "running": 0, "waiting": 0}}))
+        else:
+            print(f"No queue database found at {paths.db_path}")
+            print("Queue is empty (no tasks have been run yet)")
         return
 
     conn = sqlite3.connect(paths.db_path, timeout=5.0)
@@ -64,6 +68,38 @@ def cmd_list(args):
         rows = conn.execute(
             "SELECT * FROM queue ORDER BY queue_name, id"
         ).fetchall()
+
+        if json_output:
+            tasks = []
+            running_count = 0
+            waiting_count = 0
+            for row in rows:
+                task = {
+                    "id": row["id"],
+                    "queue_name": row["queue_name"],
+                    "status": row["status"],
+                    "command": row["command"] if "command" in row.keys() else None,
+                    "pid": row["pid"],
+                    "child_pid": row["child_pid"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+                tasks.append(task)
+                if row["status"] == "running":
+                    running_count += 1
+                elif row["status"] == "waiting":
+                    waiting_count += 1
+
+            output = {
+                "tasks": tasks,
+                "summary": {
+                    "total": len(tasks),
+                    "running": running_count,
+                    "waiting": waiting_count,
+                },
+            }
+            print(json.dumps(output))
+            return
 
         if not rows:
             print("Queue is empty")
@@ -106,9 +142,13 @@ def cmd_list(args):
 def cmd_clear(args):
     """Clear all tasks from the queue."""
     paths = get_paths(args)
+    json_output = getattr(args, "json", False)
 
     if not paths.db_path.exists():
-        print("No queue database found")
+        if json_output:
+            print(json.dumps({"cleared": 0, "success": True}))
+        else:
+            print("No queue database found")
         return
 
     conn = sqlite3.connect(paths.db_path, timeout=5.0)
@@ -116,17 +156,26 @@ def cmd_clear(args):
         # Check how many tasks exist
         count = conn.execute("SELECT COUNT(*) FROM queue").fetchone()[0]
         if count == 0:
-            print("Queue is already empty")
+            if json_output:
+                print(json.dumps({"cleared": 0, "success": True}))
+            else:
+                print("Queue is already empty")
             return
 
-        response = input(f"Clear {count} task(s) from queue? [y/N] ")
-        if response.lower() != 'y':
-            print("Cancelled")
-            return
+        # JSON mode skips confirmation (implies --force)
+        if not json_output:
+            response = input(f"Clear {count} task(s) from queue? [y/N] ")
+            if response.lower() != 'y':
+                print("Cancelled")
+                return
 
         cursor = conn.execute("DELETE FROM queue")
         conn.commit()
-        print(f"Cleared {cursor.rowcount} task(s) from queue")
+
+        if json_output:
+            print(json.dumps({"cleared": cursor.rowcount, "success": True}))
+        else:
+            print(f"Cleared {cursor.rowcount} task(s) from queue")
     finally:
         conn.close()
 
@@ -134,13 +183,29 @@ def cmd_clear(args):
 def cmd_logs(args):
     """Show recent log entries."""
     paths = get_paths(args)
+    json_output = getattr(args, "json", False)
 
     if not paths.metrics_path.exists():
-        print(f"No log file found at {paths.metrics_path}")
+        if json_output:
+            print(json.dumps({"entries": []}))
+        else:
+            print(f"No log file found at {paths.metrics_path}")
         return
 
     lines = paths.metrics_path.read_text().strip().split("\n")
     recent = lines[-args.n:] if len(lines) > args.n else lines
+
+    if json_output:
+        entries = []
+        for line in recent:
+            try:
+                entry = json.loads(line)
+                entries.append(entry)
+            except json.JSONDecodeError:
+                # Skip malformed lines in JSON mode
+                pass
+        print(json.dumps({"entries": entries}))
+        return
 
     for line in recent:
         try:
@@ -214,13 +279,13 @@ def cleanup_queue(conn, queue_name: str, paths: QueuePaths):
         print(f"[tq] WARNING: Cleared task from old CLI instance (ID: {task['id']}, old_instance: {task['server_id']})")
 
 
-def register_task(conn, queue_name: str, paths: QueuePaths) -> int:
+def register_task(conn, queue_name: str, paths: QueuePaths, command: str = None) -> int:
     """Register a task in the queue. Returns task_id immediately."""
     my_pid = os.getpid()
 
     cursor = conn.execute(
-        "INSERT INTO queue (queue_name, status, pid, server_id) VALUES (?, ?, ?, ?)",
-        (queue_name, "waiting", my_pid, CLI_INSTANCE_ID),
+        "INSERT INTO queue (queue_name, status, pid, server_id, command) VALUES (?, ?, ?, ?, ?)",
+        (queue_name, "waiting", my_pid, CLI_INSTANCE_ID, command),
     )
     conn.commit()
     task_id = cursor.lastrowid
@@ -364,7 +429,7 @@ def cmd_run(args):
         cleanup_queue(conn, queue_name, paths)
 
         # Register task first so task_id is available for cleanup if interrupted
-        task_id = register_task(conn, queue_name, paths)
+        task_id = register_task(conn, queue_name, paths, command=command)
         wait_for_turn(conn, queue_name, task_id, paths)
 
         print(f"[tq] Running: {command}")
@@ -477,14 +542,17 @@ def main():
     run_parser.add_argument("run_command", nargs=argparse.REMAINDER, metavar="COMMAND", help="Command to run")
 
     # list
-    subparsers.add_parser("list", help="List tasks in queue")
+    list_parser = subparsers.add_parser("list", help="List tasks in queue")
+    list_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
     # clear
-    subparsers.add_parser("clear", help="Clear all tasks from queue")
+    clear_parser = subparsers.add_parser("clear", help="Clear all tasks from queue")
+    clear_parser.add_argument("--json", action="store_true", help="Output in JSON format and skip confirmation")
 
     # logs
     logs_parser = subparsers.add_parser("logs", help="Show recent log entries")
     logs_parser.add_argument("-n", type=int, default=20, help="Number of entries (default: 20)")
+    logs_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
     # Handle implicit run: tq ./gradlew build -> tq run ./gradlew build
     # Pre-process argv to insert 'run' if needed
