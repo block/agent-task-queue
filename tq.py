@@ -547,7 +547,7 @@ def main():
 
     # clear
     clear_parser = subparsers.add_parser("clear", help="Clear all tasks from queue")
-    clear_parser.add_argument("--json", action="store_true", help="Output in JSON format (implies --force)")
+    clear_parser.add_argument("--json", action="store_true", help="Output in JSON format and skip confirmation")
 
     # logs
     logs_parser = subparsers.add_parser("logs", help="Show recent log entries")

@@ -157,7 +157,10 @@ class TestTqList:
         assert "No queue database" in result.stdout or "empty" in result.stdout.lower()
 
     def test_list_json_empty_queue(self, temp_data_dir):
-        """Test list --json command with empty queue."""
+        """Test list --json command with DB exists but queue is empty."""
+        # Initialize DB by running a task that completes
+        run_tq("echo", "init", data_dir=temp_data_dir)
+
         result = run_tq("list", "--json", data_dir=temp_data_dir)
 
         assert result.returncode == 0
