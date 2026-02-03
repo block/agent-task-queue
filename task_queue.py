@@ -231,7 +231,7 @@ def get_memory_mb() -> float:
 
 
 # --- Core Queue Logic ---
-async def wait_for_turn(queue_name: str) -> int:
+async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
     """Register task, wait for turn, return task ID when acquired."""
     # Ensure database exists and is valid
     ensure_db()
@@ -250,8 +250,8 @@ async def wait_for_turn(queue_name: str) -> int:
 
     with get_db() as conn:
         cursor = conn.execute(
-            "INSERT INTO queue (queue_name, status, pid, server_id) VALUES (?, ?, ?, ?)",
-            (queue_name, "waiting", my_pid, SERVER_INSTANCE_ID),
+            "INSERT INTO queue (queue_name, status, pid, server_id, command) VALUES (?, ?, ?, ?, ?)",
+            (queue_name, "waiting", my_pid, SERVER_INSTANCE_ID, command),
         )
         task_id = cursor.lastrowid
 
@@ -440,7 +440,7 @@ async def run_task(
                 key, value = pair.split("=", 1)
                 env[key.strip()] = value.strip()
 
-    task_id = await wait_for_turn(queue_name)
+    task_id = await wait_for_turn(queue_name, command)
     mem_before = get_memory_mb()
 
     start = time.time()
