@@ -263,8 +263,9 @@ async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
     queued_at = time.time()
 
     if ctx:
+        cmd_preview = (command[:50] + "...") if command and len(command) > 50 else command
         await ctx.info(
-            log_fmt(f"Request #{task_id} received. Entering '{queue_name}' queue.")
+            log_fmt(f"Task #{task_id} queued ({cmd_preview}). Entering '{queue_name}' queue.")
         )
 
     last_pos = -1
@@ -293,12 +294,12 @@ async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
 
                     if pos != last_pos:
                         if ctx:
-                            await ctx.info(log_fmt(f"Position #{pos} in queue. Waiting..."))
+                            await ctx.info(log_fmt(f"Task #{task_id} is position #{pos} in queue. Waiting..."))
                         last_pos = pos
                     elif wait_ticks % 10 == 0 and ctx:  # Update every ~10 polls
                         await ctx.info(
                             log_fmt(
-                                f"Still waiting... Position #{pos} ({int(wait_ticks * POLL_INTERVAL_WAITING)}s elapsed)"
+                                f"Task #{task_id} still waiting... Position #{pos} ({int(wait_ticks * POLL_INTERVAL_WAITING)}s elapsed)"
                             )
                         )
 
@@ -329,7 +330,9 @@ async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
                         wait_time_seconds=round(wait_time, 2),
                     )
                     if ctx:
-                        await ctx.info(log_fmt("Lock ACQUIRED. Starting execution."))
+                        # Include task ID and truncated command for visibility
+                        cmd_preview = (command[:50] + "...") if command and len(command) > 50 else command
+                        await ctx.info(log_fmt(f"Task #{task_id} lock ACQUIRED. Running: {cmd_preview}"))
                     return task_id
 
             await asyncio.sleep(POLL_INTERVAL_READY)
@@ -368,7 +371,7 @@ async def release_lock(task_id: int):
         pass
 
     if ctx:
-        await ctx.info(log_fmt("Task complete. Queue slot released."))
+        await ctx.info(log_fmt(f"Task #{task_id} complete. Queue slot released."))
 
 
 # --- The Tool ---
