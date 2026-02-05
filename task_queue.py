@@ -248,6 +248,9 @@ async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
     except LookupError:
         pass  # Running outside request context (e.g., in tests)
 
+    # Compute command preview once for status messages (truncate long commands)
+    cmd_preview = (command[:50] + "...") if command and len(command) > 50 else command
+
     with get_db() as conn:
         cursor = conn.execute(
             "INSERT INTO queue (queue_name, status, pid, server_id, command) VALUES (?, ?, ?, ?, ?)",
@@ -263,9 +266,11 @@ async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
     queued_at = time.time()
 
     if ctx:
-        cmd_preview = (command[:50] + "...") if command and len(command) > 50 else command
         await ctx.info(
-            log_fmt(f"Task #{task_id} queued ({cmd_preview}). Entering '{queue_name}' queue.")
+            log_fmt(
+                f"Task #{task_id} queued{f' ({cmd_preview})' if cmd_preview else ''}. "
+                f"Entering '{queue_name}' queue."
+            )
         )
 
     last_pos = -1
@@ -330,9 +335,8 @@ async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
                         wait_time_seconds=round(wait_time, 2),
                     )
                     if ctx:
-                        # Include task ID and truncated command for visibility
-                        cmd_preview = (command[:50] + "...") if command and len(command) > 50 else command
-                        await ctx.info(log_fmt(f"Task #{task_id} lock ACQUIRED. Running: {cmd_preview}"))
+                        msg = f"Task #{task_id} lock ACQUIRED.{f' Running: {cmd_preview}' if cmd_preview else ''}"
+                        await ctx.info(log_fmt(msg))
                     return task_id
 
             await asyncio.sleep(POLL_INTERVAL_READY)
