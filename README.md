@@ -315,6 +315,10 @@ Pass options via the `args` property in your MCP config:
 
 Run `uvx agent-task-queue@latest --help` to see all options.
 
+## IntelliJ Plugin
+
+An optional [IntelliJ plugin](intellij-plugin/) provides real-time IDE integration — status bar widget, tool window with live streaming output, and balloon notifications for queue events. See the [plugin README](intellij-plugin/README.md) for details.
+
 ## Architecture
 
 ```mermaid

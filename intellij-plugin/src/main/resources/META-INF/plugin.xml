@@ -17,6 +17,10 @@
         <applicationService serviceImplementation="com.block.agenttaskqueue.data.TaskQueueDatabase"/>
         <applicationService serviceImplementation="com.block.agenttaskqueue.data.TaskQueuePoller"/>
         <applicationService serviceImplementation="com.block.agenttaskqueue.data.TaskCanceller"/>
+        <applicationService serviceImplementation="com.block.agenttaskqueue.data.TaskQueueNotifier"/>
+
+        <!-- Notifications -->
+        <notificationGroup id="Agent Task Queue" displayType="BALLOON"/>
 
         <!-- Tool Window -->
         <toolWindow id="Agent Task Queue"

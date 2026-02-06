@@ -12,6 +12,8 @@ class TaskQueueSettings : PersistentStateComponent<TaskQueueSettings.State> {
 
     data class State(
         var dataDir: String = System.getenv("TASK_QUEUE_DATA_DIR") ?: "/tmp/agent-task-queue",
+        var displayMode: String = "default",
+        var notificationsEnabled: Boolean = true,
     )
 
     private var state = State()
@@ -26,6 +28,18 @@ class TaskQueueSettings : PersistentStateComponent<TaskQueueSettings.State> {
         get() = state.dataDir
         set(value) {
             state.dataDir = value
+        }
+
+    var displayMode: String
+        get() = state.displayMode
+        set(value) {
+            state.displayMode = value
+        }
+
+    var notificationsEnabled: Boolean
+        get() = state.notificationsEnabled
+        set(value) {
+            state.notificationsEnabled = value
         }
 
     val dbPath: String
