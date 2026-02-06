@@ -1,0 +1,64 @@
+<idea-plugin>
+    <id>com.block.agenttaskqueue</id>
+    <name>Agent Task Queue</name>
+    <vendor>Block</vendor>
+    <version>0.1.0</version>
+    <description><![CDATA[
+        Live status bar widget and tool window for monitoring and managing the agent-task-queue build serializer.
+        Shows running/waiting tasks, allows cancellation, and provides output log access.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- Services -->
+        <applicationService serviceImplementation="com.block.agenttaskqueue.model.TaskQueueModel"/>
+        <applicationService serviceImplementation="com.block.agenttaskqueue.settings.TaskQueueSettings"/>
+        <applicationService serviceImplementation="com.block.agenttaskqueue.data.TaskQueueDatabase"/>
+        <applicationService serviceImplementation="com.block.agenttaskqueue.data.TaskQueuePoller"/>
+        <applicationService serviceImplementation="com.block.agenttaskqueue.data.TaskCanceller"/>
+
+        <!-- Tool Window -->
+        <toolWindow id="Agent Task Queue"
+                    factoryClass="com.block.agenttaskqueue.ui.TaskQueueToolWindowFactory"
+                    anchor="bottom"
+                    secondary="true"
+                    icon="/icons/taskQueue.svg"/>
+
+        <!-- Status Bar Widget -->
+        <statusBarWidgetFactory id="AgentTaskQueueStatusBar"
+                                implementation="com.block.agenttaskqueue.ui.TaskQueueStatusBarWidgetFactory"
+                                order="after encodingWidget"/>
+
+        <!-- Settings -->
+        <applicationConfigurable id="com.block.agenttaskqueue.settings"
+                                 displayName="Agent Task Queue"
+                                 parentId="tools"
+                                 instance="com.block.agenttaskqueue.settings.TaskQueueConfigurable"/>
+    </extensions>
+
+    <actions>
+        <group id="AgentTaskQueueToolbar" text="Agent Task Queue Actions">
+            <action id="AgentTaskQueue.Refresh"
+                    class="com.block.agenttaskqueue.actions.RefreshQueueAction"
+                    text="Refresh"
+                    description="Refresh the task queue"
+                    icon="AllIcons.Actions.Refresh"/>
+            <action id="AgentTaskQueue.Cancel"
+                    class="com.block.agenttaskqueue.actions.CancelTaskAction"
+                    text="Cancel Task"
+                    description="Cancel the selected task"
+                    icon="AllIcons.Actions.Cancel"/>
+            <action id="AgentTaskQueue.Clear"
+                    class="com.block.agenttaskqueue.actions.ClearQueueAction"
+                    text="Clear Queue"
+                    description="Clear all tasks from the queue"
+                    icon="AllIcons.Actions.GC"/>
+            <action id="AgentTaskQueue.ViewOutput"
+                    class="com.block.agenttaskqueue.actions.OpenOutputLogAction"
+                    text="View Output"
+                    description="Open the output log for the selected task"
+                    icon="AllIcons.Actions.Preview"/>
+        </group>
+    </actions>
+</idea-plugin>

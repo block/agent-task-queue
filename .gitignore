@@ -33,3 +33,7 @@ dist/
 # Local notes
 thoughts/
 *.lock
+
+# IntelliJ Plugin
+intellij-plugin/build/
+intellij-plugin/.gradle/
