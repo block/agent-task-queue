@@ -19,7 +19,7 @@ import javax.swing.JPanel
 
 class OutputPanel(
     private val project: Project,
-    private val taskId: Int,
+    val taskId: Int,
     logFilePath: String,
 ) : JPanel(BorderLayout()), Disposable {
 

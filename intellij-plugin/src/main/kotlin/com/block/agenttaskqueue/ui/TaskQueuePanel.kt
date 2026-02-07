@@ -14,6 +14,8 @@ import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.table.JBTable
 import java.awt.BorderLayout
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import javax.swing.JPanel
 
 class TaskQueuePanel(private val project: Project) : JPanel(BorderLayout()), DataProvider {
@@ -21,6 +23,7 @@ class TaskQueuePanel(private val project: Project) : JPanel(BorderLayout()), Dat
     private val tableModel = TaskQueueTableModel()
     private val table = JBTable(tableModel)
     private val summaryLabel = JBLabel("Queue is empty")
+    var onTaskClicked: ((QueueTask) -> Unit)? = null
 
     init {
         val group = ActionManager.getInstance().getAction("AgentTaskQueueToolbar") as ActionGroup
@@ -39,6 +42,18 @@ class TaskQueuePanel(private val project: Project) : JPanel(BorderLayout()), Dat
         table.columnModel.getColumn(4).preferredWidth = 80   // Time
         table.columnModel.getColumn(4).maxWidth = 100
         table.autoResizeMode = javax.swing.JTable.AUTO_RESIZE_SUBSEQUENT_COLUMNS
+
+        table.addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) {
+                val row = table.rowAtPoint(e.point)
+                if (row >= 0) {
+                    val task = tableModel.getTaskAt(row) ?: return
+                    if (task.status == "running") {
+                        onTaskClicked?.invoke(task)
+                    }
+                }
+            }
+        })
 
         add(JBScrollPane(table), BorderLayout.CENTER)
 
