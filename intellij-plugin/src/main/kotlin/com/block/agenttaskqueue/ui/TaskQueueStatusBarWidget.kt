@@ -31,7 +31,8 @@ class TaskQueueStatusBarWidget(private val project: Project) : CustomStatusBarWi
         toolTipText = "Agent Task Queue - Click to open"
         addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
-                ToolWindowManager.getInstance(project).getToolWindow("Agent Task Queue")?.activate(null)
+                val toolWindow = ToolWindowManager.getInstance(project).getToolWindow("Agent Task Queue") ?: return
+                if (toolWindow.isVisible) toolWindow.hide() else toolWindow.activate(null)
             }
         })
     }
@@ -81,7 +82,7 @@ class TaskQueueStatusBarWidget(private val project: Project) : CustomStatusBarWi
             else -> {
                 val runningTask = tasks.firstOrNull { it.status == "running" }
                 if (runningTask != null) {
-                    val cmd = runningTask.command ?: "unknown"
+                    val cmd = runningTask.displayCommand
                     val truncatedCmd = cmd.take(40) + if (cmd.length > 40) "..." else ""
                     when (mode) {
                         "verbose" -> {

@@ -29,6 +29,10 @@ class TaskQueueModel {
     fun update(newTasks: List<QueueTask>) {
         tasks = newTasks
         summary = QueueSummary.fromTasks(newTasks)
+        notifyListeners()
+    }
+
+    fun notifyListeners() {
         ApplicationManager.getApplication().invokeLater {
             ApplicationManager.getApplication().messageBus
                 .syncPublisher(TOPIC)

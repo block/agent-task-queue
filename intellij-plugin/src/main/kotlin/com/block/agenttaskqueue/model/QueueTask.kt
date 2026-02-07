@@ -9,4 +9,8 @@ data class QueueTask(
     val childPid: Int?,
     val createdAt: String?,
     val updatedAt: String?,
-)
+) {
+    /** Command with leading KEY=value env var prefixes stripped. */
+    val displayCommand: String
+        get() = (command ?: "unknown").replace(Regex("^(\\w+=\\S+\\s+)+"), "")
+}

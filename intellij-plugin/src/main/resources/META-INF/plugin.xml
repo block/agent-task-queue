@@ -63,6 +63,12 @@
                     text="View Output"
                     description="Open the output log for the selected task"
                     icon="AllIcons.Actions.Preview"/>
+            <separator/>
+            <action id="AgentTaskQueue.Settings"
+                    class="com.block.agenttaskqueue.actions.OpenSettingsAction"
+                    text="Settings"
+                    description="Open Agent Task Queue settings"
+                    icon="AllIcons.General.GearPlain"/>
         </group>
     </actions>
 </idea-plugin>

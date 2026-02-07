@@ -1,5 +1,6 @@
 package com.block.agenttaskqueue.settings
 
+import com.block.agenttaskqueue.model.TaskQueueModel
 import com.intellij.openapi.options.Configurable
 import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.ui.TextFieldWithBrowseButton
@@ -59,6 +60,7 @@ class TaskQueueConfigurable : Configurable {
         settings.dataDir = dataDirField?.text ?: return
         settings.displayMode = displayModes.getOrNull(displayModeCombo?.selectedIndex ?: -1) ?: "default"
         settings.notificationsEnabled = notificationsCheckbox?.isSelected ?: true
+        TaskQueueModel.getInstance().notifyListeners()
     }
 
     override fun reset() {
