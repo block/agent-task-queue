@@ -35,7 +35,7 @@ class TaskQueueToolWindowFactory : ToolWindowFactory {
                 val tabTitle = runningTask.displayCommand.take(30) +
                     if (runningTask.displayCommand.length > 30) "..." else ""
                 val outputDir = TaskQueueSettings.getInstance().outputDir
-                val logPath = "$outputDir/task_${runningTask.id}.log"
+                val logPath = "$outputDir/task_${runningTask.id}.raw.log"
 
                 val outputPanel = OutputPanel(project, runningTask.id, logPath)
                 Disposer.register(contentManager, outputPanel)

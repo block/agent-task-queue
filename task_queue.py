@@ -21,6 +21,8 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_context
+from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
 
 # Import shared queue infrastructure
 from queue_core import (
@@ -197,7 +199,7 @@ def cleanup_output_files():
     if not OUTPUT_DIR.exists():
         return
 
-    files = sorted(OUTPUT_DIR.glob("task_*.log"), key=lambda f: f.stat().st_mtime)
+    files = sorted(OUTPUT_DIR.glob("task_*"), key=lambda f: f.stat().st_mtime)
     if len(files) > MAX_OUTPUT_FILES:
         for old_file in files[: len(files) - MAX_OUTPUT_FILES]:
             try:
@@ -212,7 +214,7 @@ def clear_output_files() -> int:
         return 0
 
     count = 0
-    for f in OUTPUT_DIR.glob("task_*.log"):
+    for f in OUTPUT_DIR.glob("task_*"):
         try:
             f.unlink()
             count += 1
@@ -372,16 +374,30 @@ async def release_lock(task_id: int):
 
 
 # --- The Tool ---
-@mcp.tool()
+@mcp.tool(
+    title="Run Queued Task",
+    annotations={
+        "destructiveHint": True,
+        "openWorldHint": False,
+        "idempotentHint": False,
+    },
+)
 async def run_task(
     command: str,
     working_directory: str,
     queue_name: str = "global",
     timeout_seconds: int = 1200,
     env_vars: str = "",
-) -> str:
+):
     """
     Execute a command through the task queue for sequential processing.
+
+    IMPORTANT: Before calling this tool, tell the user the exact command you are
+    about to run (e.g., "Running `./gradlew :app:compileDebugKotlin`").
+    This provides visibility since the tool execution may take a while.
+
+    When a command fails, analyze the output tail to identify the root cause and
+    show the user the specific error with the responsible file/line if available.
 
     YOU MUST USE THIS TOOL instead of running shell commands directly when the
     command involves ANY of the following:
@@ -473,15 +489,17 @@ async def run_task(
                 "UPDATE queue SET child_pid = ? WHERE id = ?", (proc.pid, task_id)
             )
 
-        # Open file for streaming output - write header first
-        with open(output_file, "w") as f:
+        # Open files for streaming output - formatted log + raw log for plugin tailing
+        raw_output_file = OUTPUT_DIR / f"task_{task_id}.raw.log"
+        with open(output_file, "w") as f, open(raw_output_file, "w") as raw_f:
+            # Header to formatted log only
             f.write(f"COMMAND: {command}\n")
             f.write(f"WORKING DIR: {working_directory}\n")
             f.write(f"STARTED: {datetime.now().isoformat()}\n")
             f.write("\n--- STDOUT ---\n")
 
             async def stream_to_file(stream, tail_buffer: deque, label: str):
-                """Stream output directly to file, keeping only tail in memory."""
+                """Stream output directly to both files, keeping only tail in memory."""
                 nonlocal stdout_count, stderr_count
                 while True:
                     line = await stream.readline()
@@ -489,7 +507,9 @@ async def run_task(
                         break
                     decoded = line.decode().rstrip()
                     f.write(decoded + "\n")
-                    f.flush()  # Ensure immediate write to disk
+                    f.flush()
+                    raw_f.write(decoded + "\n")
+                    raw_f.flush()
                     tail_buffer.append(decoded)
                     if label == "stdout":
                         stdout_count += 1
@@ -510,7 +530,7 @@ async def run_task(
                 await proc.wait()
                 duration = time.time() - start
 
-                # Append summary to file
+                # Append summary to formatted log only
                 f.write("\n--- SUMMARY ---\n")
                 f.write(f"EXIT CODE: {proc.returncode}\n")
                 f.write(f"DURATION: {duration:.1f}s\n")
@@ -536,7 +556,18 @@ async def run_task(
 
                 tail = list(stderr_tail) if stderr_tail else list(stdout_tail)
                 tail_text = "\n".join(tail) if tail else "(no output)"
-                return f"TIMEOUT killed after {timeout_seconds}s output={output_file}\n{tail_text}"
+                text = f"TIMEOUT killed after {timeout_seconds}s command={command} output={output_file}\n{tail_text}"
+                return ToolResult(
+                    content=[TextContent(type="text", text=text)],
+                    structured_content={"result": {
+                        "status": "timeout",
+                        "exit_code": None,
+                        "duration_seconds": timeout_seconds,
+                        "command": command,
+                        "output_file": str(output_file),
+                        "tail": tail_text,
+                    }},
+                )
 
         # File is now closed, log metrics
         mem_after = get_memory_mb()
@@ -556,12 +587,34 @@ async def run_task(
 
         # Return concise summary for agents
         if proc.returncode == 0:
-            return f"SUCCESS exit=0 {duration:.1f}s output={output_file}"
+            text = f"SUCCESS exit=0 {duration:.1f}s command={command} output={output_file}"
+            return ToolResult(
+                content=[TextContent(type="text", text=text)],
+                structured_content={"result": {
+                    "status": "success",
+                    "exit_code": 0,
+                    "duration_seconds": round(duration, 1),
+                    "command": command,
+                    "output_file": str(output_file),
+                    "tail": None,
+                }},
+            )
         else:
             # On failure, include tail of output for context
             tail = list(stderr_tail) if stderr_tail else list(stdout_tail)
             tail_text = "\n".join(tail) if tail else "(no output)"
-            return f"FAILED exit={proc.returncode} {duration:.1f}s output={output_file}\n{tail_text}"
+            text = f"FAILED exit={proc.returncode} {duration:.1f}s command={command} output={output_file}\n{tail_text}"
+            return ToolResult(
+                content=[TextContent(type="text", text=text)],
+                structured_content={"result": {
+                    "status": "failed",
+                    "exit_code": proc.returncode,
+                    "duration_seconds": round(duration, 1),
+                    "command": command,
+                    "output_file": str(output_file),
+                    "tail": tail_text,
+                }},
+            )
 
     except asyncio.CancelledError:
         # Client disconnected while task was running - kill the subprocess
