@@ -195,13 +195,16 @@ def cleanup_queue(conn, queue_name: str):
 
 # --- Output File Management ---
 def cleanup_output_files():
-    """Remove oldest output files if over MAX_OUTPUT_FILES limit."""
+    """Remove oldest output files if over limit. Covers both .log and .raw.log files."""
     if not OUTPUT_DIR.exists():
         return
 
+    # Group files by task ID so both .log and .raw.log are cleaned together
     files = sorted(OUTPUT_DIR.glob("task_*"), key=lambda f: f.stat().st_mtime)
-    if len(files) > MAX_OUTPUT_FILES:
-        for old_file in files[: len(files) - MAX_OUTPUT_FILES]:
+    # Each task produces up to 2 files (.log + .raw.log), so scale the limit
+    max_files = MAX_OUTPUT_FILES * 2
+    if len(files) > max_files:
+        for old_file in files[: len(files) - max_files]:
             try:
                 old_file.unlink()
             except OSError:
@@ -466,7 +469,14 @@ async def run_task(
     stdout_count = 0
     stderr_count = 0
 
-    # Create output file early and stream directly to it
+    # Two output files are written per task:
+    #   task_<id>.log     — formatted log with metadata headers, section markers (--- STDOUT ---,
+    #                       --- STDERR ---, --- SUMMARY ---), and exit code. Written by all MCP
+    #                       server versions. Used by the IntelliJ plugin notifier to read exit
+    #                       codes, and by "View Output" to open full logs.
+    #   task_<id>.raw.log — raw stdout+stderr only, no markers or metadata. Added in MCP server
+    #                       v0.4.0 (not present in v0.3.x and earlier). Used by the IntelliJ
+    #                       plugin OutputStreamer for clean tailing in output tabs.
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_file = OUTPUT_DIR / f"task_{task_id}.log"
 
