@@ -45,13 +45,37 @@ class TaskQueuePoller : Disposable {
 
     private fun poll() {
         try {
-            val tasks = TaskQueueDatabase.getInstance().fetchAllTasks()
+            val db = TaskQueueDatabase.getInstance()
+            var tasks = db.fetchAllTasks()
+
+            // Clean up stale tasks whose server process is no longer alive
+            val staleTasks = tasks.filter { it.pid != null && !isProcessAlive(it.pid) }
+            if (staleTasks.isNotEmpty()) {
+                for (task in staleTasks) {
+                    LOG.info("Removing stale task #${task.id} (pid ${task.pid} is dead)")
+                    db.deleteTask(task.id)
+                }
+                tasks = tasks - staleTasks.toSet()
+            }
+
             if (tasks != previousTasks) {
                 previousTasks = tasks
                 TaskQueueModel.getInstance().update(tasks)
             }
         } catch (e: Exception) {
             LOG.warn("Failed to poll task queue", e)
+        }
+    }
+
+    private fun isProcessAlive(pid: Int): Boolean {
+        return try {
+            // kill -0 checks if process exists without sending a signal
+            val process = ProcessBuilder("kill", "-0", pid.toString())
+                .redirectErrorStream(true)
+                .start()
+            process.waitFor() == 0
+        } catch (e: Exception) {
+            false
         }
     }
 

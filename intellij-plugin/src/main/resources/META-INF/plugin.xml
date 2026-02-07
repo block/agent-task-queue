@@ -27,6 +27,7 @@
                     factoryClass="com.block.agenttaskqueue.ui.TaskQueueToolWindowFactory"
                     anchor="bottom"
                     secondary="true"
+                    canCloseContents="true"
                     icon="/icons/taskQueue.svg"/>
 
         <!-- Status Bar Widget -->
