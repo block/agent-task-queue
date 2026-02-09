@@ -19,10 +19,8 @@ Click the widget to open the tool window. Configure the display mode in **Settin
 
 ### Tool Window
 
-Two tabs:
-
-- **Queue** — Table of all tasks with ID, status, queue name, command, and relative time. Toolbar actions for refresh, cancel, clear, and view output.
-- **Output** — Live streaming console view of the currently running task's output. Automatically switches when a new task starts running.
+- **Queue** tab — Table of all tasks with ID, status, queue name, command, and relative time. Toolbar actions for refresh, cancel, clear, view output, and settings. Click a running task row to open its output tab.
+- **Output** tabs — Per-task closeable tabs with live streaming console output. Automatically opened when a task starts running. Tabs can be closed and reopened by clicking the running task in the queue table.
 
 ### Notifications
 
@@ -34,7 +32,7 @@ Balloon notifications for queue events (can be disabled in settings):
 | Task finishes (exit 0) | Info balloon | "Finished: `./gradlew build`" |
 | Task fails (exit != 0) | Error balloon (sticky) | "Failed: `./gradlew build`" + View Output action |
 
-Failure detection works by reading the `EXIT CODE` from the task's output log after it disappears from the queue.
+Failure detection works by reading the `EXIT CODE` from the formatted task log (`task_<id>.log`) after it disappears from the queue.
 
 ## Architecture
 
@@ -57,12 +55,15 @@ Two independent polling loops, each active only when needed:
 - 1s interval when tasks exist (active)
 - 3s interval when queue is empty (idle)
 - Supports manual refresh via a conflated coroutine channel
+- Detects stale tasks by checking if the server PID is still alive (`kill -0`), and removes them from the DB
 
-**Output file tailer** (`OutputStreamer`) — Tails the running task's log file:
+**Output file tailer** (`OutputStreamer`) — Tails the running task's output file:
 - Only active while a task is running (no coroutine exists otherwise)
 - 50ms interval when new data was just read (active streaming)
 - 200ms interval when no new data (waiting for output)
 - Uses `RandomAccessFile` with byte offset tracking to read only new content
+- Prefers `task_<id>.raw.log` (MCP server v0.4.0+) for clean output with no filtering
+- Falls back to `task_<id>.log` with header skipping and marker filtering for MCP server v0.3.x and earlier
 
 We chose polling over `java.nio.file.WatchService` because WatchService on macOS falls back to internal polling at 2-10s intervals (no native kqueue support for file modifications in Java), which would actually be slower.
 
@@ -87,6 +88,8 @@ All UI components subscribe to `TaskQueueModel.TOPIC` on the IntelliJ message bu
 
 Task cancellation sends SIGTERM to the process group (negative PID), waits 500ms, then sends SIGKILL if still alive. The Python task runner uses `start_new_session=True` when spawning subprocesses, which creates a dedicated process group — this ensures `kill -TERM -<pgid>` cleanly terminates the entire process tree.
 
+The UI is updated optimistically — the task is removed from the model immediately so the table responds instantly, before the background process kill and DB cleanup complete. The poller reconciles with the DB on subsequent polls.
+
 ## Database Schema
 
 The plugin reads from the `queue` table:
@@ -102,7 +105,7 @@ The plugin reads from the `queue` table:
 | `created_at` | TIMESTAMP | When task was queued |
 | `updated_at` | TIMESTAMP | Last status change |
 
-Output logs are at `<data_dir>/output/task_<id>.log`.
+Output logs are at `<data_dir>/output/task_<id>.log` (formatted) and `<data_dir>/output/task_<id>.raw.log` (raw output, MCP server v0.4.0+).
 
 ## Building
 
@@ -142,6 +145,7 @@ src/main/kotlin/com/block/agenttaskqueue/
 │   ├── CancelTaskAction.kt        # Cancel selected task
 │   ├── ClearQueueAction.kt        # Clear all tasks
 │   ├── OpenOutputLogAction.kt     # Open log file in editor
+│   ├── OpenSettingsAction.kt      # Open settings page
 │   ├── RefreshQueueAction.kt      # Manual refresh
 │   └── TaskQueueDataKeys.kt       # DataKey for selected task
 ├── data/

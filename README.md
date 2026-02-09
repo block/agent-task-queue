@@ -348,7 +348,9 @@ The queue state is stored in SQLite at `/tmp/agent-task-queue/queue.db`:
 | `id` | INTEGER | Auto-incrementing primary key |
 | `queue_name` | TEXT | Queue identifier (e.g., "global", "android") |
 | `status` | TEXT | Task state: "waiting" or "running" |
+| `command` | TEXT | Shell command being executed |
 | `pid` | INTEGER | MCP server process ID (for liveness check) |
+| `server_id` | TEXT | Server instance UUID (for orphan detection across PID reuse) |
 | `child_pid` | INTEGER | Subprocess ID (for orphan cleanup) |
 | `created_at` | TIMESTAMP | When task was queued |
 | `updated_at` | TIMESTAMP | Last status change |
@@ -387,23 +389,29 @@ To reduce token usage, full command output is written to files instead of return
 
 ```
 /tmp/agent-task-queue/output/
-├── task_1.log
+├── task_1.log         # Formatted log with metadata and section markers
+├── task_1.raw.log     # Raw stdout+stderr only (for plugin streaming)
 ├── task_2.log
+├── task_2.raw.log
 └── ...
 ```
 
+Each task produces two output files:
+- **`task_<id>.log`** — Formatted log with headers (`COMMAND:`, `WORKING DIR:`), section markers (`--- STDOUT ---`, `--- STDERR ---`, `--- SUMMARY ---`), and exit code. Used by the IntelliJ plugin notifier and the "View Output" action.
+- **`task_<id>.raw.log`** — Raw stdout+stderr only, no metadata. Used by the IntelliJ plugin for clean streaming output in tabs. Added in MCP server v0.4.0.
+
 **On success**, the tool returns a single line:
 ```
-SUCCESS exit=0 31.2s output=/tmp/agent-task-queue/output/task_8.log
+SUCCESS exit=0 31.2s command=./gradlew build output=/tmp/agent-task-queue/output/task_8.log
 ```
 
 **On failure**, the last 50 lines of output are included:
 ```
-FAILED exit=1 12.5s output=/tmp/agent-task-queue/output/task_9.log
+FAILED exit=1 12.5s command=./gradlew build output=/tmp/agent-task-queue/output/task_9.log
 [error output here]
 ```
 
-**Automatic cleanup**: Old files are deleted when count exceeds 50 (configurable via `MAX_OUTPUT_FILES`).
+**Automatic cleanup**: Old files are deleted when count exceeds 50 tasks (configurable via `--max-output-files`).
 
 **Manual cleanup**: Use the `clear_task_logs` tool to delete all output files.
 
