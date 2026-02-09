@@ -1,12 +1,30 @@
 <idea-plugin>
     <id>com.block.agenttaskqueue</id>
     <name>Agent Task Queue</name>
-    <vendor>Block</vendor>
-    <version>0.1.0</version>
+    <vendor url="https://github.com/block/agent-task-queue" email="oss@block.xyz">Block</vendor>
     <description><![CDATA[
-        Live status bar widget and tool window for monitoring and managing the agent-task-queue build serializer.
-        Shows running/waiting tasks, allows cancellation, and provides output log access.
+        <p>Real-time visibility into the <b>agent-task-queue</b> build serializer —
+        a task queue that prevents concurrent builds from freezing your machine.</p>
+        <ul>
+            <li>Status bar widget showing running task and queue depth</li>
+            <li>Tool window with live queue table and per-task streaming output</li>
+            <li>Balloon notifications for task start, finish, and failure</li>
+            <li>One-click task cancellation and queue management</li>
+        </ul>
+        <p>Requires the <a href="https://github.com/block/agent-task-queue">agent-task-queue</a>
+        MCP server (v0.3.x+) to be running.</p>
     ]]></description>
+    <change-notes><![CDATA[
+        <b>0.3.2</b>
+        <ul>
+            <li>Initial release</li>
+            <li>Status bar widget with configurable display modes</li>
+            <li>Tool window with queue table and per-task output tabs</li>
+            <li>Balloon notifications for task lifecycle events</li>
+            <li>Task cancellation via process group termination</li>
+            <li>Stale task detection and cleanup</li>
+        </ul>
+    ]]></change-notes>
 
     <depends>com.intellij.modules.platform</depends>
 
