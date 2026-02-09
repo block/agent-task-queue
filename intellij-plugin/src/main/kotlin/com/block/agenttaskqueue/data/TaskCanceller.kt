@@ -1,6 +1,7 @@
 package com.block.agenttaskqueue.data
 
 import com.block.agenttaskqueue.model.QueueTask
+import com.block.agenttaskqueue.model.TaskQueueModel
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
@@ -16,6 +17,11 @@ class TaskCanceller {
     }
 
     fun cancelTask(task: QueueTask) {
+        // Optimistic UI update — remove from model immediately so the table updates
+        // without waiting for the next DB poll (which races with process cleanup)
+        val model = TaskQueueModel.getInstance()
+        model.update(model.tasks.filter { it.id != task.id })
+
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 if (task.status == "running" && task.childPid != null) {
@@ -30,6 +36,9 @@ class TaskCanceller {
     }
 
     fun clearAllTasks(tasks: List<QueueTask>) {
+        // Optimistic UI update — clear the model immediately
+        TaskQueueModel.getInstance().update(emptyList())
+
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 for (task in tasks) {
