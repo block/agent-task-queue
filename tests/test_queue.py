@@ -505,9 +505,15 @@ async def test_output_file_rotation():
                 },
             )
 
-        # Should only have MAX_OUTPUT_FILES files
-        files = list(OUTPUT_DIR.glob("task_*.log"))
-        assert len(files) <= MAX_OUTPUT_FILES
+        # Should only have MAX_OUTPUT_FILES tasks worth of files
+        # Each task produces 2 files (.log + .raw.log), glob("task_*.log") matches both
+        all_files = list(OUTPUT_DIR.glob("task_*.log"))
+        assert len(all_files) <= MAX_OUTPUT_FILES * 2
+        # Verify .raw.log files are also cleaned (not just .log)
+        log_files = [f for f in all_files if f.name.endswith(".log") and not f.name.endswith(".raw.log")]
+        raw_files = [f for f in all_files if f.name.endswith(".raw.log")]
+        assert len(log_files) <= MAX_OUTPUT_FILES
+        assert len(raw_files) <= MAX_OUTPUT_FILES
 
 
 @pytest.mark.asyncio
@@ -538,10 +544,11 @@ async def test_oldest_logs_deleted_first():
             if match:
                 task_ids.append(int(match.group(1)))
 
-    # Get remaining files
-    remaining_files = list(OUTPUT_DIR.glob("task_*.log"))
+    # Get remaining files — filter to .log only (exclude .raw.log) for task ID extraction
+    all_remaining = list(OUTPUT_DIR.glob("task_*.log"))
+    remaining_log_files = [f for f in all_remaining if not f.name.endswith(".raw.log")]
     remaining_ids = []
-    for f in remaining_files:
+    for f in remaining_log_files:
         import re
 
         match = re.search(r"task_(\d+)\.log", f.name)
@@ -551,6 +558,10 @@ async def test_oldest_logs_deleted_first():
     # The first 3 task IDs should be gone (oldest deleted)
     for old_id in task_ids[:3]:
         assert old_id not in remaining_ids, f"Old task {old_id} should have been deleted"
+        # Verify the .raw.log companion file is also gone
+        assert not (OUTPUT_DIR / f"task_{old_id}.raw.log").exists(), (
+            f"Raw log for old task {old_id} should also have been deleted"
+        )
 
     # The last MAX_OUTPUT_FILES task IDs should still exist
     for new_id in task_ids[-MAX_OUTPUT_FILES:]:
