@@ -163,6 +163,17 @@ See [Cline MCP docs](https://docs.cline.bot/mcp/configuring-mcp-servers) for det
 </details>
 
 <details>
+<summary>Codex</summary>
+
+Install via CLI (<a href="https://developers.openai.com/codex/mcp">guide</a>):
+
+```bash
+codex mcp add agent-task-queue -- uvx agent-task-queue@latest
+```
+
+</details>
+
+<details>
 <summary>Copilot / VS Code</summary>
 
 Requires VS Code 1.102+ with GitHub Copilot Chat extension.
