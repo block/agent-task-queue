@@ -320,6 +320,70 @@ async def test_parent_capacity_blocks_different_child_queues(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_parent_capacity_preserves_fifo_within_child_queue(monkeypatch):
+    """A tighter parent scope should not let a younger child task jump the queue."""
+    monkeypatch.setattr(
+        task_queue,
+        "QUEUE_CAPACITIES",
+        parse_queue_capacities(["gradle=1", "gradle/emu-5557=2"]),
+    )
+
+    results = {}
+    end_times = {}
+
+    async def run_parent_blocker():
+        client = Client(mcp)
+        async with client:
+            result = await client.call_tool(
+                "run_task",
+                {
+                    "command": "sleep 2 && echo 'parent done'",
+                    "working_directory": "/tmp",
+                    "queue_name": "gradle/emu-5559",
+                },
+            )
+            results["parent"] = str(result)
+
+    async def run_older_child():
+        await asyncio.sleep(0.2)
+        client = Client(mcp)
+        async with client:
+            result = await client.call_tool(
+                "run_task",
+                {
+                    "command": "sleep 1 && echo 'older child done'",
+                    "working_directory": "/tmp",
+                    "queue_name": "gradle/emu-5557",
+                },
+            )
+            end_times["older"] = time.time()
+            results["older"] = str(result)
+
+    async def run_younger_child():
+        await asyncio.sleep(0.4)
+        client = Client(mcp)
+        async with client:
+            result = await client.call_tool(
+                "run_task",
+                {
+                    "command": "echo 'younger child done'",
+                    "working_directory": "/tmp",
+                    "queue_name": "gradle/emu-5557",
+                },
+            )
+            end_times["younger"] = time.time()
+            results["younger"] = str(result)
+
+    await asyncio.gather(run_parent_blocker(), run_older_child(), run_younger_child())
+
+    assert "SUCCESS" in results["older"]
+    assert "SUCCESS" in results["younger"]
+    assert "older child done" in read_output_file(results["older"])
+    assert "younger child done" in read_output_file(results["younger"])
+    assert end_times["older"] <= end_times["younger"]
+
+
+@pytest.mark.asyncio
 async def test_parent_capacity_allows_parallel_child_queues(monkeypatch):
     """A parent scope with capacity 2 should allow two child queues to run together."""
     monkeypatch.setattr(task_queue, "QUEUE_CAPACITIES", parse_queue_capacities(["gradle=2"]))

@@ -196,17 +196,25 @@ def can_acquire_task(conn, task_id: int, queue_name: str, queue_capacities: dict
 
     exact_capacity = queue_capacities.get(normalized_queue, 1)
     exact_running = count_running_in_queue(conn, normalized_queue)
-    available_exact_slots = exact_capacity - exact_running
-    if available_exact_slots <= 0:
-        return False
-
-    if count_waiting_ahead(conn, normalized_queue, task_id) >= available_exact_slots:
-        return False
+    available_slots = exact_capacity - exact_running
+    if normalized_queue in queue_capacities:
+        available_slots = min(
+            available_slots,
+            exact_capacity - count_running_in_scope(conn, normalized_queue),
+        )
 
     for scope in scopes:
-        if scope not in queue_capacities:
+        if scope not in queue_capacities or scope == normalized_queue:
             continue
-        if count_running_in_scope(conn, scope) >= queue_capacities[scope]:
+        available_slots = min(
+            available_slots,
+            queue_capacities[scope] - count_running_in_scope(conn, scope),
+        )
+
+    if available_slots <= 0:
+        return False
+
+    if count_waiting_ahead(conn, normalized_queue, task_id) >= available_slots:
             return False
 
     return True
