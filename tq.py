@@ -286,6 +286,9 @@ def cleanup_queue(conn, queue_name: str, paths: QueuePaths):
         )
         print(f"[tq] WARNING: Cleared task from old CLI instance (ID: {task['id']}, old_instance: {task['server_id']})")
 
+    if conn.in_transaction:
+        conn.commit()
+
 
 def register_task(conn, queue_name: str, paths: QueuePaths, command: str = None) -> int:
     """Register a task in the queue. Returns task_id immediately."""
@@ -313,8 +316,6 @@ def wait_for_turn(conn, queue_name: str, task_id: int, paths: QueuePaths, queue_
     while True:
         try:
             cleanup_queue(conn, queue_name, paths)
-            if conn.in_transaction:
-                conn.commit()
 
             started, pos = attempt_task_start(
                 conn,
