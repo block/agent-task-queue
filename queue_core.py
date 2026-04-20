@@ -189,7 +189,13 @@ def count_waiting_ahead(conn, queue_name: str, task_id: int) -> int:
     return row["c"]
 
 
-def can_acquire_task(conn, task_id: int, queue_name: str, queue_capacities: dict[str, int]) -> bool:
+def can_acquire_task(
+    conn,
+    task_id: int,
+    queue_name: str,
+    queue_capacities: dict[str, int],
+    waiting_ahead: int | None = None,
+) -> bool:
     """Return True when the task can start without violating queue capacities."""
     normalized_queue = normalize_queue_name(queue_name)
     scopes = queue_scopes(normalized_queue)
@@ -214,8 +220,11 @@ def can_acquire_task(conn, task_id: int, queue_name: str, queue_capacities: dict
     if available_slots <= 0:
         return False
 
-    if count_waiting_ahead(conn, normalized_queue, task_id) >= available_slots:
-            return False
+    if waiting_ahead is None:
+        waiting_ahead = count_waiting_ahead(conn, normalized_queue, task_id)
+
+    if waiting_ahead >= available_slots:
+        return False
 
     return True
 
@@ -235,13 +244,21 @@ def attempt_task_start(
     if conn.in_transaction:
         conn.commit()
 
+    previous_busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
     conn.execute("PRAGMA busy_timeout=100")
 
     try:
         conn.execute("BEGIN IMMEDIATE")
+        waiting_ahead = count_waiting_ahead(conn, queue_name, task_id)
 
-        if not can_acquire_task(conn, task_id, queue_name, queue_capacities):
-            position = count_waiting_ahead(conn, queue_name, task_id) + 1
+        if not can_acquire_task(
+            conn,
+            task_id,
+            queue_name,
+            queue_capacities,
+            waiting_ahead=waiting_ahead,
+        ):
+            position = waiting_ahead + 1
             conn.commit()
             return False, position
 
@@ -261,6 +278,8 @@ def attempt_task_start(
         if conn.in_transaction:
             conn.rollback()
         raise
+    finally:
+        conn.execute(f"PRAGMA busy_timeout={int(previous_busy_timeout)}")
 
 
 def ensure_db(paths: QueuePaths):
