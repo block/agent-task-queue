@@ -201,13 +201,10 @@ def can_acquire_task(
     scopes = queue_scopes(normalized_queue)
 
     exact_capacity = queue_capacities.get(normalized_queue, 1)
-    exact_running = count_running_in_queue(conn, normalized_queue)
-    available_slots = exact_capacity - exact_running
     if normalized_queue in queue_capacities:
-        available_slots = min(
-            available_slots,
-            exact_capacity - count_running_in_scope(conn, normalized_queue),
-        )
+        available_slots = exact_capacity - count_running_in_scope(conn, normalized_queue)
+    else:
+        available_slots = exact_capacity - count_running_in_queue(conn, normalized_queue)
 
     for scope in scopes:
         if scope not in queue_capacities or scope == normalized_queue:
