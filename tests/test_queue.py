@@ -1089,6 +1089,13 @@ def test_parse_args_defaults():
         sys.argv = original_argv
 
 
+def test_should_parse_module_args_for_console_script():
+    """Installed entrypoints should parse module args; library imports should not."""
+    assert task_queue._should_parse_module_args("agent-task-queue", "task_queue") is True
+    assert task_queue._should_parse_module_args("task_queue.py", "task_queue") is True
+    assert task_queue._should_parse_module_args("pytest", "task_queue") is False
+
+
 def test_parse_args_data_dir():
     """Test --data-dir argument parsing."""
     import sys

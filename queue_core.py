@@ -274,7 +274,8 @@ def attempt_task_start(
         raise
     finally:
         if previous_busy_timeout is not None:
-            conn.execute(f"PRAGMA busy_timeout={int(previous_busy_timeout)}")
+            # SQLite PRAGMA statements do not support bound parameters.
+            conn.execute("PRAGMA busy_timeout=" + str(int(previous_busy_timeout)))
 
 
 def ensure_db(paths: QueuePaths):

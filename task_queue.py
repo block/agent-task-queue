@@ -12,6 +12,7 @@ import os
 import resource
 import signal
 import sqlite3
+import sys
 import time
 import threading
 import uuid
@@ -99,8 +100,18 @@ def parse_args():
     return parser.parse_args()
 
 
+def _should_parse_module_args(argv0: str | None = None, module_name: str | None = None) -> bool:
+    """Return True when the module is being launched as the task queue server."""
+    module_name = module_name or __name__
+    if module_name == "__main__":
+        return True
+
+    executable = Path(argv0 or sys.argv[0]).name
+    return executable in {"agent-task-queue", "task_queue", "task_queue.py"}
+
+
 # Parse args at module load (before MCP server starts)
-_args = parse_args() if __name__ == "__main__" else argparse.Namespace(
+_args = parse_args() if _should_parse_module_args() else argparse.Namespace(
     data_dir="/tmp/agent-task-queue",
     max_log_size=5,
     max_output_files=50,
