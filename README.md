@@ -37,6 +37,26 @@ run_task("npm run build", queue_name="web", ...)
 
 Both agents block until their respective builds complete. The server handles sequencing automatically.
 
+**Hierarchical queues** - Use `/`-delimited queue names plus `--queue-capacity` when you need
+parallelism with a shared cap:
+
+```bash
+uvx agent-task-queue@latest \
+  --queue-capacity=gradle=2 \
+  --queue-capacity=gradle/emu-5557=1 \
+  --queue-capacity=gradle/emu-5559=1
+```
+
+```python
+run_task("./gradlew connectedDebugAndroidTest", queue_name="gradle/emu-5557", env_vars="ANDROID_SERIAL=127.0.0.1:5557", ...)
+run_task("./gradlew connectedDebugAndroidTest", queue_name="gradle/emu-5559", env_vars="ANDROID_SERIAL=127.0.0.1:5559", ...)
+```
+
+Configured capacities apply to a scope and all of its descendants. In the example above, the
+shared `gradle` scope allows at most two concurrent Gradle-backed tasks, while each emulator leaf
+queue remains exclusive. If you do not configure any capacities, behavior is unchanged: each exact
+`queue_name` is still a FIFO queue with capacity 1.
+
 ## Demo: Two Agents, One Build Queue
 
 **Terminal A** - First agent requests an Android build:
@@ -242,6 +262,9 @@ Agents use the `run_task` MCP tool for expensive operations:
 | `timeout_seconds` | No | Max **execution** time before kill (default: 1200). Queue wait time doesn't count. |
 | `env_vars` | No | Environment variables: `"KEY=val,KEY2=val2"` |
 
+`queue_name` may be hierarchical, such as `gradle/emu-5557`, when the server is configured with
+`--queue-capacity` scopes.
+
 ### Example
 
 ```
@@ -250,6 +273,30 @@ run_task(
     working_directory="/project",
     queue_name="android",
     env_vars="ANDROID_SERIAL=emulator-5560"
+)
+```
+
+### Android Multi-Emulator Pattern
+
+If your machine can safely run a small number of Gradle-backed device tests in parallel, use a
+shared Gradle scope plus one queue per emulator:
+
+```bash
+uvx agent-task-queue@latest \
+  --queue-capacity=gradle=2 \
+  --queue-capacity=gradle/emu-5557=1 \
+  --queue-capacity=gradle/emu-5559=1 \
+  --queue-capacity=gradle/emu-5561=1
+```
+
+Then pin each task to the matching queue and `ANDROID_SERIAL`:
+
+```python
+run_task(
+    command="./gradlew connectedDebugAndroidTest",
+    working_directory="/project",
+    queue_name="gradle/emu-5557",
+    env_vars="ANDROID_SERIAL=127.0.0.1:5557",
 )
 ```
 
@@ -295,6 +342,7 @@ The server supports the following command-line options:
 | `--max-output-files` | `50` | Number of task output files to retain |
 | `--tail-lines` | `50` | Lines of output to include on failure |
 | `--lock-timeout` | `120` | Minutes before stale locks are cleared |
+| `--queue-capacity` | none | Repeatable `scope=capacity` override for hierarchical queue names |
 
 Pass options via the `args` property in your MCP config:
 
@@ -306,7 +354,9 @@ Pass options via the `args` property in your MCP config:
       "args": [
         "agent-task-queue@latest",
         "--max-output-files=100",
-        "--lock-timeout=60"
+        "--lock-timeout=60",
+        "--queue-capacity=gradle=2",
+        "--queue-capacity=gradle/emu-5557=1"
       ]
     }
   }

@@ -15,6 +15,7 @@ os.environ["TASK_QUEUE_POLL_READY"] = "0.1"
 
 from datetime import datetime, timedelta
 from fastmcp import Client
+import task_queue
 from task_queue import (
     mcp,
     PATHS,
@@ -25,6 +26,7 @@ from task_queue import (
     cleanup_queue,
     MAX_LOCK_AGE_MINUTES,
 )
+from queue_core import parse_queue_capacities
 
 # Use PATHS for database path
 DB_PATH = PATHS.db_path
@@ -47,6 +49,12 @@ def clean_db():
     # Cleanup after test
     if DB_PATH.exists():
         DB_PATH.unlink()
+
+
+@pytest.fixture(autouse=True)
+def reset_queue_capacities(monkeypatch):
+    """Reset queue capacity overrides between tests."""
+    monkeypatch.setattr(task_queue, "QUEUE_CAPACITIES", {})
 
 
 @pytest.fixture
@@ -257,6 +265,87 @@ async def test_different_queues_isolation():
         )
         assert "SUCCESS" in str(result3)
         assert "Queue Alpha Again" in read_output_file(str(result3))
+
+
+@pytest.mark.asyncio
+async def test_parent_capacity_blocks_different_child_queues(monkeypatch):
+    """A parent scope with capacity 1 should serialize its child queues."""
+    monkeypatch.setattr(task_queue, "QUEUE_CAPACITIES", parse_queue_capacities(["gradle=1"]))
+
+    results = {}
+    end_times = {}
+
+    async def run_task_a():
+        client = Client(mcp)
+        async with client:
+            result = await client.call_tool(
+                "run_task",
+                {
+                    "command": "sleep 2 && echo 'EMU 5557 done'",
+                    "working_directory": "/tmp",
+                    "queue_name": "gradle/emu-5557",
+                },
+            )
+            end_times["A"] = time.time()
+            results["A"] = str(result)
+
+    async def run_task_b():
+        await asyncio.sleep(0.3)
+        client = Client(mcp)
+        async with client:
+            result = await client.call_tool(
+                "run_task",
+                {
+                    "command": "echo 'EMU 5559 done'",
+                    "working_directory": "/tmp",
+                    "queue_name": "gradle/emu-5559",
+                },
+            )
+            end_times["B"] = time.time()
+            results["B"] = str(result)
+
+    await asyncio.gather(run_task_a(), run_task_b())
+
+    assert "SUCCESS" in results["A"]
+    assert "SUCCESS" in results["B"]
+    assert "EMU 5557 done" in read_output_file(results["A"])
+    assert "EMU 5559 done" in read_output_file(results["B"])
+    assert end_times["B"] >= end_times["A"] - 0.3
+
+
+@pytest.mark.asyncio
+async def test_parent_capacity_allows_parallel_child_queues(monkeypatch):
+    """A parent scope with capacity 2 should allow two child queues to run together."""
+    monkeypatch.setattr(task_queue, "QUEUE_CAPACITIES", parse_queue_capacities(["gradle=2"]))
+
+    results = {}
+    end_times = {}
+    overall_start = time.time()
+
+    async def run_child(queue_name: str, result_key: str):
+        client = Client(mcp)
+        async with client:
+            result = await client.call_tool(
+                "run_task",
+                {
+                    "command": f"sleep 2 && echo '{queue_name} done'",
+                    "working_directory": "/tmp",
+                    "queue_name": queue_name,
+                },
+            )
+            end_times[result_key] = time.time()
+            results[result_key] = str(result)
+
+    await asyncio.gather(
+        run_child("gradle/emu-5557", "A"),
+        run_child("gradle/emu-5559", "B"),
+    )
+
+    total_elapsed = time.time() - overall_start
+    assert "SUCCESS" in results["A"]
+    assert "SUCCESS" in results["B"]
+    assert total_elapsed < 3.5
+    assert abs(end_times["A"] - end_times["B"]) < 1.0
 
 
 @pytest.mark.asyncio

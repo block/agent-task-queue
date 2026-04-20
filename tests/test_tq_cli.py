@@ -82,6 +82,33 @@ class TestTqRun:
         assert result.returncode == 0
         assert "queued in 'longqueue'" in result.stdout
 
+    def test_queue_capacity_option(self, temp_data_dir):
+        """Test global --queue-capacity option with implicit run mode."""
+        result = run_tq(
+            "--queue-capacity=gradle=2",
+            "-q",
+            "gradle/emu-5557",
+            "echo",
+            "capacity test",
+            data_dir=temp_data_dir,
+        )
+
+        assert result.returncode == 0
+        assert "queued in 'gradle/emu-5557'" in result.stdout
+        assert "[tq] SUCCESS" in result.stdout
+
+    def test_invalid_queue_capacity_option(self, temp_data_dir):
+        """Test invalid --queue-capacity value is rejected."""
+        result = run_tq(
+            "--queue-capacity=gradle=abc",
+            "echo",
+            "oops",
+            data_dir=temp_data_dir,
+        )
+
+        assert result.returncode == 1
+        assert "Invalid capacity 'abc'" in result.stderr
+
     def test_working_directory_option(self, temp_data_dir):
         """Test -C/--dir option."""
         result = run_tq("-C", "/tmp", "pwd", data_dir=temp_data_dir)

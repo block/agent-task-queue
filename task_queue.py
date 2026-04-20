@@ -35,8 +35,10 @@ from queue_core import (
     log_fmt,
     is_process_alive,
     kill_process_tree,
+    normalize_queue_name,
+    parse_queue_capacities,
+    attempt_task_start,
     POLL_INTERVAL_WAITING,
-    POLL_INTERVAL_READY,
 )
 
 # Unique identifier for this server instance - used to detect orphaned tasks
@@ -84,6 +86,16 @@ def parse_args():
         default=120,
         help="Minutes before stale locks are cleared (default: 120)",
     )
+    parser.add_argument(
+        "--queue-capacity",
+        action="append",
+        default=[],
+        metavar="SCOPE=CAPACITY",
+        help=(
+            "Hierarchical queue capacity override. Repeatable. "
+            "Example: --queue-capacity=gradle=2 --queue-capacity=gradle/emu-5557=1"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -94,6 +106,7 @@ _args = parse_args() if __name__ == "__main__" else argparse.Namespace(
     max_output_files=50,
     tail_lines=50,
     lock_timeout=120,
+    queue_capacity=[],
 )
 
 # --- Configuration ---
@@ -104,6 +117,7 @@ MAX_OUTPUT_FILES = _args.max_output_files
 TAIL_LINES_ON_FAILURE = _args.tail_lines
 SERVER_NAME = "Task Queue"
 MAX_LOCK_AGE_MINUTES = _args.lock_timeout
+QUEUE_CAPACITIES = parse_queue_capacities(_args.queue_capacity)
 
 mcp = FastMCP(SERVER_NAME)
 
@@ -238,6 +252,8 @@ def get_memory_mb() -> float:
 # --- Core Queue Logic ---
 async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
     """Register task, wait for turn, return task ID when acquired."""
+    queue_name = normalize_queue_name(queue_name)
+
     # Ensure database exists and is valid
     ensure_db()
 
@@ -277,22 +293,29 @@ async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
 
     try:
         while True:
-            with get_db() as conn:
-                cleanup_queue(conn, queue_name)
+            try:
+                with get_db() as conn:
+                    cleanup_queue(conn, queue_name)
 
-                runner = conn.execute(
-                    "SELECT id FROM queue WHERE queue_name = ? AND status = 'running'",
-                    (queue_name,),
-                ).fetchone()
-
-                if runner:
-                    pos = (
-                        conn.execute(
-                            "SELECT COUNT(*) as c FROM queue WHERE queue_name = ? AND status = 'waiting' AND id < ?",
-                            (queue_name, task_id),
-                        ).fetchone()["c"]
-                        + 1
+                    started, pos = attempt_task_start(
+                        conn,
+                        task_id,
+                        queue_name,
+                        QUEUE_CAPACITIES,
+                        my_pid,
                     )
+
+                    if started:
+                        wait_time = time.time() - queued_at
+                        log_metric(
+                            "task_started",
+                            task_id=task_id,
+                            queue_name=queue_name,
+                            wait_time_seconds=round(wait_time, 2),
+                        )
+                        if ctx:
+                            await ctx.info(log_fmt("Lock ACQUIRED. Starting execution."))
+                        return task_id
 
                     wait_ticks += 1
 
@@ -306,38 +329,11 @@ async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
                                 f"Still waiting... Position #{pos} ({int(wait_ticks * POLL_INTERVAL_WAITING)}s elapsed)"
                             )
                         )
+            except sqlite3.OperationalError as exc:
+                if "database is locked" not in str(exc).lower():
+                    raise
 
-                    await asyncio.sleep(POLL_INTERVAL_WAITING)
-                    continue
-
-                # Atomic lock acquisition: UPDATE only succeeds if we're the first
-                # waiting task AND no one is currently running. This prevents race
-                # conditions where two tasks both think they're next.
-                cursor = conn.execute(
-                    """UPDATE queue SET status = 'running', updated_at = ?, pid = ?
-                       WHERE id = ? AND status = 'waiting'
-                       AND NOT EXISTS (
-                           SELECT 1 FROM queue WHERE queue_name = ? AND status = 'running'
-                       )
-                       AND id = (
-                           SELECT MIN(id) FROM queue WHERE queue_name = ? AND status = 'waiting'
-                       )""",
-                    (datetime.now().isoformat(), my_pid, task_id, queue_name, queue_name),
-                )
-
-                if cursor.rowcount > 0:
-                    wait_time = time.time() - queued_at
-                    log_metric(
-                        "task_started",
-                        task_id=task_id,
-                        queue_name=queue_name,
-                        wait_time_seconds=round(wait_time, 2),
-                    )
-                    if ctx:
-                        await ctx.info(log_fmt("Lock ACQUIRED. Starting execution."))
-                    return task_id
-
-            await asyncio.sleep(POLL_INTERVAL_READY)
+            await asyncio.sleep(POLL_INTERVAL_WAITING)
     except asyncio.CancelledError:
         # Client disconnected (e.g., sub-agent cancelled) - clean up our queue entry
         with _active_task_ids_lock:
@@ -438,6 +434,8 @@ async def run_task(
         command: The full shell command to run.
         working_directory: ABSOLUTE path to the execution root.
         queue_name: Queue identifier for grouping tasks (default: "global").
+            Queue names may be hierarchical (for example `gradle/emu-5557`) when the server
+            is configured with `--queue-capacity` scopes.
         timeout_seconds: Max **execution** time before killing the task (default: 1200 = 20 mins).
             Queue wait time does NOT count against this timeout.
         env_vars: Environment variables to set, format: "KEY1=value1,KEY2=value2"
@@ -450,6 +448,11 @@ async def run_task(
 
     if not os.path.exists(working_directory):
         return f"ERROR: Working directory does not exist: {working_directory}"
+
+    try:
+        queue_name = normalize_queue_name(queue_name)
+    except ValueError as exc:
+        return f"ERROR: {str(exc)}"
 
     # Parse environment variables
     env = os.environ.copy()

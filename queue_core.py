@@ -22,6 +22,7 @@ POLL_INTERVAL_WAITING = float(os.environ.get("TASK_QUEUE_POLL_WAITING", "1"))
 POLL_INTERVAL_READY = float(os.environ.get("TASK_QUEUE_POLL_READY", "1"))
 DEFAULT_MAX_LOCK_AGE_MINUTES = 120
 DEFAULT_MAX_METRICS_SIZE_MB = 5
+QUEUE_SCOPE_SEPARATOR = "/"
 
 
 @dataclass
@@ -103,6 +104,141 @@ def init_db(paths: QueuePaths):
                 conn.execute(migration)
             except sqlite3.OperationalError:
                 pass  # Column already exists
+
+
+def normalize_queue_name(queue_name: str) -> str:
+    """Collapse redundant separators and whitespace in queue names."""
+    parts = [part.strip() for part in queue_name.split(QUEUE_SCOPE_SEPARATOR) if part.strip()]
+    if not parts:
+        raise ValueError("queue_name must contain at least one non-empty segment")
+    return QUEUE_SCOPE_SEPARATOR.join(parts)
+
+
+def parse_queue_capacities(capacity_args: list[str] | None) -> dict[str, int]:
+    """Parse repeated scope=capacity CLI arguments into a normalized map."""
+    capacities: dict[str, int] = {}
+    for arg in capacity_args or []:
+        if "=" not in arg:
+            raise ValueError(
+                f"Invalid --queue-capacity value '{arg}'. Expected SCOPE=CAPACITY."
+            )
+
+        scope, raw_capacity = arg.split("=", 1)
+        scope = normalize_queue_name(scope)
+        try:
+            capacity = int(raw_capacity)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid capacity '{raw_capacity}' for scope '{scope}'. Expected a positive integer."
+            ) from exc
+
+        if capacity < 1:
+            raise ValueError(
+                f"Invalid capacity '{capacity}' for scope '{scope}'. Capacity must be >= 1."
+            )
+
+        capacities[scope] = capacity
+
+    return capacities
+
+
+def queue_scopes(queue_name: str) -> list[str]:
+    """Return hierarchical scopes from broadest to most specific."""
+    normalized = normalize_queue_name(queue_name)
+    parts = normalized.split(QUEUE_SCOPE_SEPARATOR)
+    return [QUEUE_SCOPE_SEPARATOR.join(parts[:idx]) for idx in range(1, len(parts) + 1)]
+
+
+def escape_like_pattern(value: str) -> str:
+    """Escape SQLite LIKE wildcards in a literal scope name."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def count_running_in_scope(conn, scope: str) -> int:
+    """Count running tasks in a scope, including descendant queues."""
+    escaped_scope = escape_like_pattern(scope)
+    row = conn.execute(
+        """SELECT COUNT(*) AS c
+           FROM queue
+           WHERE status = 'running'
+             AND (queue_name = ? OR queue_name LIKE ? ESCAPE '\\')""",
+        (scope, f"{escaped_scope}{QUEUE_SCOPE_SEPARATOR}%"),
+    ).fetchone()
+    return row["c"]
+
+
+def count_running_in_queue(conn, queue_name: str) -> int:
+    """Count running tasks in the exact queue only."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM queue WHERE queue_name = ? AND status = 'running'",
+        (queue_name,),
+    ).fetchone()
+    return row["c"]
+
+
+def count_waiting_ahead(conn, queue_name: str, task_id: int) -> int:
+    """Count older waiting tasks in the exact queue."""
+    row = conn.execute(
+        """SELECT COUNT(*) AS c
+           FROM queue
+           WHERE queue_name = ?
+             AND status = 'waiting'
+             AND id < ?""",
+        (queue_name, task_id),
+    ).fetchone()
+    return row["c"]
+
+
+def can_acquire_task(conn, task_id: int, queue_name: str, queue_capacities: dict[str, int]) -> bool:
+    """Return True when the task can start without violating queue capacities."""
+    normalized_queue = normalize_queue_name(queue_name)
+    scopes = queue_scopes(normalized_queue)
+
+    exact_capacity = queue_capacities.get(normalized_queue, 1)
+    exact_running = count_running_in_queue(conn, normalized_queue)
+    available_exact_slots = exact_capacity - exact_running
+    if available_exact_slots <= 0:
+        return False
+
+    if count_waiting_ahead(conn, normalized_queue, task_id) >= available_exact_slots:
+        return False
+
+    for scope in scopes:
+        if scope not in queue_capacities:
+            continue
+        if count_running_in_scope(conn, scope) >= queue_capacities[scope]:
+            return False
+
+    return True
+
+
+def attempt_task_start(
+    conn,
+    task_id: int,
+    queue_name: str,
+    queue_capacities: dict[str, int],
+    owner_pid: int,
+) -> tuple[bool, int]:
+    """Attempt to transition a waiting task into running state.
+
+    Returns:
+        Tuple of (started, queue_position). queue_position is only meaningful when started is False.
+    """
+    conn.execute("PRAGMA busy_timeout=100")
+    conn.execute("BEGIN IMMEDIATE")
+
+    if not can_acquire_task(conn, task_id, queue_name, queue_capacities):
+        return False, count_waiting_ahead(conn, queue_name, task_id) + 1
+
+    cursor = conn.execute(
+        """UPDATE queue SET status = 'running', updated_at = ?, pid = ?
+           WHERE id = ? AND status = 'waiting'""",
+        (datetime.now().isoformat(), owner_pid, task_id),
+    )
+    if cursor.rowcount > 0:
+        return True, 0
+
+    return False, count_waiting_ahead(conn, queue_name, task_id) + 1
 
 
 def ensure_db(paths: QueuePaths):
