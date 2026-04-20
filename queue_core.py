@@ -19,7 +19,6 @@ from pathlib import Path
 # --- Configuration ---
 DEFAULT_DATA_DIR = Path(os.environ.get("TASK_QUEUE_DATA_DIR", "/tmp/agent-task-queue"))
 POLL_INTERVAL_WAITING = float(os.environ.get("TASK_QUEUE_POLL_WAITING", "1"))
-POLL_INTERVAL_READY = float(os.environ.get("TASK_QUEUE_POLL_READY", "1"))
 DEFAULT_MAX_LOCK_AGE_MINUTES = 120
 DEFAULT_MAX_METRICS_SIZE_MB = 5
 QUEUE_SCOPE_SEPARATOR = "/"
@@ -241,10 +240,11 @@ def attempt_task_start(
     if conn.in_transaction:
         conn.commit()
 
-    previous_busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
-    conn.execute("PRAGMA busy_timeout=100")
+    previous_busy_timeout = None
 
     try:
+        previous_busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        conn.execute("PRAGMA busy_timeout=100")
         conn.execute("BEGIN IMMEDIATE")
         waiting_ahead = count_waiting_ahead(conn, queue_name, task_id)
 
@@ -268,7 +268,7 @@ def attempt_task_start(
             conn.commit()
             return True, 0
 
-        position = count_waiting_ahead(conn, queue_name, task_id) + 1
+        position = waiting_ahead + 1
         conn.commit()
         return False, position
     except Exception:
@@ -276,7 +276,8 @@ def attempt_task_start(
             conn.rollback()
         raise
     finally:
-        conn.execute(f"PRAGMA busy_timeout={int(previous_busy_timeout)}")
+        if previous_busy_timeout is not None:
+            conn.execute(f"PRAGMA busy_timeout={int(previous_busy_timeout)}")
 
 
 def ensure_db(paths: QueuePaths):
