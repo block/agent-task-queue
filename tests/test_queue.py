@@ -26,7 +26,11 @@ from task_queue import (
     cleanup_queue,
     MAX_LOCK_AGE_MINUTES,
 )
-from queue_core import parse_queue_capacities
+from queue_core import (
+    attempt_task_start,
+    cleanup_queue as cleanup_queue_core,
+    parse_queue_capacities,
+)
 
 # Use PATHS for database path
 DB_PATH = PATHS.db_path
@@ -274,6 +278,7 @@ async def test_parent_capacity_blocks_different_child_queues(monkeypatch):
 
     results = {}
     end_times = {}
+    overall_start = time.time()
 
     async def run_task_a():
         client = Client(mcp)
@@ -310,6 +315,7 @@ async def test_parent_capacity_blocks_different_child_queues(monkeypatch):
     assert "SUCCESS" in results["B"]
     assert "EMU 5557 done" in read_output_file(results["A"])
     assert "EMU 5559 done" in read_output_file(results["B"])
+    assert time.time() - overall_start >= 1.8
     assert end_times["B"] >= end_times["A"] - 0.3
 
 
@@ -901,6 +907,52 @@ def test_orphan_cleanup_removes_untracked_task():
             "SELECT COUNT(*) as c FROM queue WHERE queue_name = 'untracked_orphan_test'"
         ).fetchone()["c"]
         assert count_after == 0, "Untracked task for our PID should be cleaned up"
+
+
+def test_attempt_task_start_after_core_cleanup_on_same_connection():
+    """Cleanup should not leave the shared connection in a broken transaction state."""
+    dead_pid = 999999999
+    my_pid = os.getpid()
+
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO queue (queue_name, status, pid, child_pid, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                "cleanup_transaction_test",
+                "running",
+                dead_pid,
+                None,
+                datetime.now().isoformat(),
+                datetime.now().isoformat(),
+            ),
+        )
+        cursor = conn.execute(
+            """INSERT INTO queue (queue_name, status, pid, child_pid, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                "cleanup_transaction_test",
+                "waiting",
+                my_pid,
+                None,
+                datetime.now().isoformat(),
+                datetime.now().isoformat(),
+            ),
+        )
+        task_id = cursor.lastrowid
+
+        cleanup_queue_core(conn, "cleanup_transaction_test", PATHS.metrics_path)
+
+        started, queue_position = attempt_task_start(
+            conn,
+            task_id,
+            "cleanup_transaction_test",
+            {},
+            my_pid,
+        )
+
+        assert started is True
+        assert queue_position == 0
 
 
 def test_stale_server_instance_cleanup():

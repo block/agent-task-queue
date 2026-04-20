@@ -328,7 +328,6 @@ def wait_for_turn(conn, queue_name: str, task_id: int, paths: QueuePaths, queue_
                     print(f"[tq] Position #{pos} in queue. Waiting...")
                     last_pos = pos
 
-                conn.commit()
                 time.sleep(POLL_INTERVAL_WAITING)
                 continue
 

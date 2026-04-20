@@ -224,21 +224,35 @@ def attempt_task_start(
     Returns:
         Tuple of (started, queue_position). queue_position is only meaningful when started is False.
     """
+    if conn.in_transaction:
+        conn.commit()
+
     conn.execute("PRAGMA busy_timeout=100")
-    conn.execute("BEGIN IMMEDIATE")
 
-    if not can_acquire_task(conn, task_id, queue_name, queue_capacities):
-        return False, count_waiting_ahead(conn, queue_name, task_id) + 1
+    try:
+        conn.execute("BEGIN IMMEDIATE")
 
-    cursor = conn.execute(
-        """UPDATE queue SET status = 'running', updated_at = ?, pid = ?
-           WHERE id = ? AND status = 'waiting'""",
-        (datetime.now().isoformat(), owner_pid, task_id),
-    )
-    if cursor.rowcount > 0:
-        return True, 0
+        if not can_acquire_task(conn, task_id, queue_name, queue_capacities):
+            position = count_waiting_ahead(conn, queue_name, task_id) + 1
+            conn.commit()
+            return False, position
 
-    return False, count_waiting_ahead(conn, queue_name, task_id) + 1
+        cursor = conn.execute(
+            """UPDATE queue SET status = 'running', updated_at = ?, pid = ?
+               WHERE id = ? AND status = 'waiting'""",
+            (datetime.now().isoformat(), owner_pid, task_id),
+        )
+        if cursor.rowcount > 0:
+            conn.commit()
+            return True, 0
+
+        position = count_waiting_ahead(conn, queue_name, task_id) + 1
+        conn.commit()
+        return False, position
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
 
 
 def ensure_db(paths: QueuePaths):
