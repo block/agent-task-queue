@@ -237,9 +237,6 @@ def attempt_task_start(
     Returns:
         Tuple of (started, queue_position). queue_position is only meaningful when started is False.
     """
-    if conn.in_transaction:
-        conn.commit()
-
     previous_busy_timeout = None
 
     try:

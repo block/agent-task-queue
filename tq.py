@@ -313,6 +313,8 @@ def wait_for_turn(conn, queue_name: str, task_id: int, paths: QueuePaths, queue_
     while True:
         try:
             cleanup_queue(conn, queue_name, paths)
+            if conn.in_transaction:
+                conn.commit()
 
             started, pos = attempt_task_start(
                 conn,

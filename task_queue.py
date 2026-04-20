@@ -296,6 +296,8 @@ async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
             try:
                 with get_db() as conn:
                     cleanup_queue(conn, queue_name)
+                    if conn.in_transaction:
+                        conn.commit()
 
                     started, pos = attempt_task_start(
                         conn,

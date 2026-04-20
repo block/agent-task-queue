@@ -973,8 +973,8 @@ def test_orphan_cleanup_removes_untracked_task():
         assert count_after == 0, "Untracked task for our PID should be cleaned up"
 
 
-def test_attempt_task_start_after_core_cleanup_on_same_connection():
-    """Cleanup should not leave the shared connection in a broken transaction state."""
+def test_attempt_task_start_after_core_cleanup_commit_on_same_connection():
+    """Callers can reuse the same connection after committing cleanup work."""
     dead_pid = 999999999
     my_pid = os.getpid()
 
@@ -1006,6 +1006,7 @@ def test_attempt_task_start_after_core_cleanup_on_same_connection():
         task_id = cursor.lastrowid
 
         cleanup_queue_core(conn, "cleanup_transaction_test", PATHS.metrics_path)
+        conn.commit()
 
         started, queue_position = attempt_task_start(
             conn,
