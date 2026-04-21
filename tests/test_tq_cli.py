@@ -74,6 +74,50 @@ def wait_for_queue_rows(db_path: Path, status: str, expected_count: int, timeout
     )
 
 
+def wait_for_queue_row(
+    db_path: Path,
+    query: str,
+    params: tuple = (),
+    *,
+    timeout: float = 5.0,
+    predicate=None,
+):
+    """Poll until a query returns a row, optionally requiring an additional predicate."""
+    deadline = time.time() + timeout
+    last_error = None
+
+    while time.time() < deadline:
+        try:
+            conn = sqlite3.connect(db_path, timeout=5.0)
+            conn.row_factory = sqlite3.Row
+            try:
+                row = conn.execute(query, params).fetchone()
+            finally:
+                conn.close()
+
+            if row is not None and (predicate is None or predicate(row)):
+                return row
+        except sqlite3.OperationalError as exc:
+            last_error = exc
+
+        time.sleep(0.05)
+
+    if last_error is not None:
+        raise last_error
+    raise AssertionError(f"Timed out waiting for queue query: {query}")
+
+
+def wait_for_process_exit(proc: subprocess.Popen, timeout: float = 10.0):
+    """Poll until a subprocess exits so signal-handling tests do not depend on one wait tick."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return proc.returncode
+        time.sleep(0.05)
+
+    raise subprocess.TimeoutExpired(proc.args, timeout)
+
+
 class TestTqRun:
     """Tests for the tq run command."""
 
@@ -649,20 +693,21 @@ class TestSignalHandling:
         # Wait for it to start running
         wait_for_queue_rows(db_path, "running", 1)
 
-        # Verify it's running
-        conn = sqlite3.connect(db_path, timeout=5.0)
-        conn.row_factory = sqlite3.Row
-        running = conn.execute("SELECT * FROM queue WHERE status = 'running'").fetchone()
+        # Wait for the stronger running condition this test depends on.
+        running = wait_for_queue_row(
+            db_path,
+            "SELECT * FROM queue WHERE status = 'running'",
+            predicate=lambda row: row["child_pid"] is not None,
+        )
         assert running is not None, "Task should be running"
         task_id = running["id"]
         child_pid = running["child_pid"]
-        assert child_pid is not None, "Child PID should be recorded"
 
         # Send SIGINT
         proc.send_signal(signal.SIGINT)
 
         # Wait for cleanup
-        proc.wait(timeout=10)
+        wait_for_process_exit(proc, timeout=10)
         assert proc.returncode == 130, "Should exit with 130 (128 + SIGINT)"
 
         # Verify task was cleaned up
@@ -733,7 +778,7 @@ class TestSignalHandling:
 
         # Wait for all to exit
         for waiter in waiters:
-            waiter.wait(timeout=5)
+            wait_for_process_exit(waiter, timeout=10)
 
         # Verify all waiting tasks were cleaned up
         conn = sqlite3.connect(db_path, timeout=5.0)
