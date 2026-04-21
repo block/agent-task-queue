@@ -32,6 +32,7 @@ from queue_core import (
     init_db as _init_db,
     ensure_db as _ensure_db,
     cleanup_queue as _cleanup_queue,
+    cleanup_targets_for_queue,
     log_metric as _log_metric,
     log_fmt,
     is_process_alive,
@@ -155,67 +156,71 @@ def log_metric(event: str, **kwargs):
     _log_metric(PATHS.metrics_path, event, MAX_METRICS_SIZE_MB, **kwargs)
 
 
-def cleanup_queue(conn, queue_name: str):
+def cleanup_queue(conn, queue_name: str, queue_capacities: dict[str, int] | None = None):
     """Clean up queue using configured paths and detect orphaned tasks."""
-    _cleanup_queue(
-        conn,
-        queue_name,
-        PATHS.metrics_path,
-        MAX_LOCK_AGE_MINUTES,
-        log_fn=lambda msg: print(log_fmt(msg)),
-    )
+    if queue_capacities is None:
+        queue_capacities = QUEUE_CAPACITIES
 
-    my_pid = os.getpid()
-
-    # Cleanup 1: Tasks with our PID but DIFFERENT server_id (from old server instance)
-    # This handles the edge case where PID is reused after server restart
-    stale_server_tasks = conn.execute(
-        "SELECT id, status, child_pid, server_id FROM queue WHERE queue_name = ? AND pid = ? AND server_id IS NOT NULL AND server_id != ?",
-        (queue_name, my_pid, SERVER_INSTANCE_ID),
-    ).fetchall()
-
-    for task in stale_server_tasks:
-        if task["child_pid"] and is_process_alive(task["child_pid"]):
-            print(log_fmt(f"WARNING: Killing orphaned subprocess {task['child_pid']} from old server"))
-            kill_process_tree(task["child_pid"])
-
-        conn.execute("DELETE FROM queue WHERE id = ?", (task["id"],))
-        log_metric(
-            "orphan_cleared",
-            task_id=task["id"],
-            queue_name=queue_name,
-            status=task["status"],
-            old_server_id=task["server_id"],
-            reason="stale_server_instance",
+    for target_queue in cleanup_targets_for_queue(conn, queue_name, queue_capacities):
+        _cleanup_queue(
+            conn,
+            target_queue,
+            PATHS.metrics_path,
+            MAX_LOCK_AGE_MINUTES,
+            log_fn=lambda msg: print(log_fmt(msg)),
         )
-        print(log_fmt(f"WARNING: Cleared task from old server instance (ID: {task['id']}, old_server: {task['server_id']})"))
 
-    # Cleanup 2: Tasks with our PID AND server_id but not in active tracking set
-    # This catches tasks left behind when clients disconnect without proper cleanup
-    our_tasks = conn.execute(
-        "SELECT id, status, child_pid FROM queue WHERE queue_name = ? AND pid = ? AND (server_id = ? OR server_id IS NULL)",
-        (queue_name, my_pid, SERVER_INSTANCE_ID),
-    ).fetchall()
+        my_pid = os.getpid()
 
-    with _active_task_ids_lock:
-        active_ids = _active_task_ids.copy()
+        # Cleanup 1: Tasks with our PID but DIFFERENT server_id (from old server instance)
+        # This handles the edge case where PID is reused after server restart
+        stale_server_tasks = conn.execute(
+            "SELECT id, status, child_pid, server_id FROM queue WHERE queue_name = ? AND pid = ? AND server_id IS NOT NULL AND server_id != ?",
+            (target_queue, my_pid, SERVER_INSTANCE_ID),
+        ).fetchall()
 
-    for orphan in our_tasks:
-        if orphan["id"] not in active_ids:
-            # This task belongs to us but we're not tracking it - it's orphaned
-            if orphan["child_pid"] and is_process_alive(orphan["child_pid"]):
-                print(log_fmt(f"WARNING: Killing orphaned subprocess {orphan['child_pid']}"))
-                kill_process_tree(orphan["child_pid"])
+        for task in stale_server_tasks:
+            if task["child_pid"] and is_process_alive(task["child_pid"]):
+                print(log_fmt(f"WARNING: Killing orphaned subprocess {task['child_pid']} from old server"))
+                kill_process_tree(task["child_pid"])
 
-            conn.execute("DELETE FROM queue WHERE id = ?", (orphan["id"],))
+            conn.execute("DELETE FROM queue WHERE id = ?", (task["id"],))
             log_metric(
                 "orphan_cleared",
-                task_id=orphan["id"],
-                queue_name=queue_name,
-                status=orphan["status"],
-                reason="not_in_active_set",
+                task_id=task["id"],
+                queue_name=target_queue,
+                status=task["status"],
+                old_server_id=task["server_id"],
+                reason="stale_server_instance",
             )
-            print(log_fmt(f"WARNING: Cleared orphaned task (ID: {orphan['id']}, status: {orphan['status']})"))
+            print(log_fmt(f"WARNING: Cleared task from old server instance (ID: {task['id']}, old_server: {task['server_id']})"))
+
+        # Cleanup 2: Tasks with our PID AND server_id but not in active tracking set
+        # This catches tasks left behind when clients disconnect without proper cleanup
+        our_tasks = conn.execute(
+            "SELECT id, status, child_pid FROM queue WHERE queue_name = ? AND pid = ? AND (server_id = ? OR server_id IS NULL)",
+            (target_queue, my_pid, SERVER_INSTANCE_ID),
+        ).fetchall()
+
+        with _active_task_ids_lock:
+            active_ids = _active_task_ids.copy()
+
+        for orphan in our_tasks:
+            if orphan["id"] not in active_ids:
+                # This task belongs to us but we're not tracking it - it's orphaned
+                if orphan["child_pid"] and is_process_alive(orphan["child_pid"]):
+                    print(log_fmt(f"WARNING: Killing orphaned subprocess {orphan['child_pid']}"))
+                    kill_process_tree(orphan["child_pid"])
+
+                conn.execute("DELETE FROM queue WHERE id = ?", (orphan["id"],))
+                log_metric(
+                    "orphan_cleared",
+                    task_id=orphan["id"],
+                    queue_name=target_queue,
+                    status=orphan["status"],
+                    reason="not_in_active_set",
+                )
+                print(log_fmt(f"WARNING: Cleared orphaned task (ID: {orphan['id']}, status: {orphan['status']})"))
 
     if conn.in_transaction:
         conn.commit()
@@ -274,7 +279,7 @@ async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
     # Run cleanup BEFORE inserting - this clears orphaned tasks that would otherwise
     # block the queue forever (since cleanup only runs during polling)
     with get_db() as conn:
-        cleanup_queue(conn, queue_name)
+        cleanup_queue(conn, queue_name, QUEUE_CAPACITIES)
 
     my_pid = os.getpid()
     ctx = None
@@ -309,7 +314,7 @@ async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
         while True:
             try:
                 with get_db() as conn:
-                    cleanup_queue(conn, queue_name)
+                    cleanup_queue(conn, queue_name, QUEUE_CAPACITIES)
 
                     started, pos = attempt_task_start(
                         conn,

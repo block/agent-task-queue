@@ -1020,6 +1020,67 @@ def test_attempt_task_start_after_core_cleanup_commit_on_same_connection():
         assert queue_position == 0
 
 
+def test_parent_scope_cleanup_reaps_stale_sibling_runner(monkeypatch):
+    """A stale sibling runner should not keep a parent scope permanently full."""
+    capacities = parse_queue_capacities(["gradle=1"])
+    monkeypatch.setattr(task_queue, "QUEUE_CAPACITIES", capacities)
+
+    dead_pid = 999999999
+    my_pid = os.getpid()
+
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO queue (queue_name, status, pid, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                "gradle/emu-5557",
+                "running",
+                dead_pid,
+                datetime.now().isoformat(),
+                datetime.now().isoformat(),
+            ),
+        )
+        cursor = conn.execute(
+            """INSERT INTO queue (queue_name, status, pid, server_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                "gradle/emu-5559",
+                "waiting",
+                my_pid,
+                task_queue.SERVER_INSTANCE_ID,
+                datetime.now().isoformat(),
+                datetime.now().isoformat(),
+            ),
+        )
+        task_id = cursor.lastrowid
+
+        with task_queue._active_task_ids_lock:
+            task_queue._active_task_ids.add(task_id)
+
+        try:
+            cleanup_queue(conn, "gradle/emu-5559")
+
+            started, queue_position = attempt_task_start(
+                conn,
+                task_id,
+                "gradle/emu-5559",
+                capacities,
+                my_pid,
+            )
+
+            remaining_sibling_runners = conn.execute(
+                "SELECT COUNT(*) AS c FROM queue WHERE queue_name = ? AND status = 'running'",
+                ("gradle/emu-5557",),
+            ).fetchone()["c"]
+
+            assert started is True
+            assert queue_position == 0
+            assert remaining_sibling_runners == 0
+        finally:
+            with task_queue._active_task_ids_lock:
+                task_queue._active_task_ids.discard(task_id)
+
+
 def test_stale_server_instance_cleanup():
     """Test that cleanup removes tasks from old server instances even if PID is reused.
 

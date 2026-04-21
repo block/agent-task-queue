@@ -25,6 +25,7 @@ from queue_core import (
     init_db,
     ensure_db,
     cleanup_queue as _cleanup_queue,
+    cleanup_targets_for_queue,
     log_metric as _log_metric,
     release_lock,
     is_process_alive,
@@ -257,34 +258,40 @@ def log_metric(paths: QueuePaths, event: str, **kwargs):
     _log_metric(paths.metrics_path, event, DEFAULT_MAX_METRICS_SIZE_MB, **kwargs)
 
 
-def cleanup_queue(conn, queue_name: str, paths: QueuePaths):
+def cleanup_queue(
+    conn,
+    queue_name: str,
+    paths: QueuePaths,
+    queue_capacities: dict[str, int] | None = None,
+):
     """Clean up queue (wrapper for CLI)."""
-    _cleanup_queue(conn, queue_name, paths.metrics_path, DEFAULT_MAX_LOCK_AGE_MINUTES)
+    for target_queue in cleanup_targets_for_queue(conn, queue_name, queue_capacities):
+        _cleanup_queue(conn, target_queue, paths.metrics_path, DEFAULT_MAX_LOCK_AGE_MINUTES)
 
-    # Additional cleanup: Tasks with our PID but DIFFERENT instance_id (from old CLI instance)
-    # This handles the edge case where PID is reused after CLI crash
-    my_pid = os.getpid()
-    stale_tasks = conn.execute(
-        "SELECT id, status, child_pid, server_id FROM queue WHERE queue_name = ? AND pid = ? AND server_id IS NOT NULL AND server_id != ?",
-        (queue_name, my_pid, CLI_INSTANCE_ID),
-    ).fetchall()
+        # Additional cleanup: Tasks with our PID but DIFFERENT instance_id (from old CLI instance)
+        # This handles the edge case where PID is reused after CLI crash
+        my_pid = os.getpid()
+        stale_tasks = conn.execute(
+            "SELECT id, status, child_pid, server_id FROM queue WHERE queue_name = ? AND pid = ? AND server_id IS NOT NULL AND server_id != ?",
+            (target_queue, my_pid, CLI_INSTANCE_ID),
+        ).fetchall()
 
-    for task in stale_tasks:
-        if task["child_pid"] and is_process_alive(task["child_pid"]):
-            print(f"[tq] WARNING: Killing orphaned subprocess {task['child_pid']} from old CLI instance")
-            kill_process_tree(task["child_pid"])
+        for task in stale_tasks:
+            if task["child_pid"] and is_process_alive(task["child_pid"]):
+                print(f"[tq] WARNING: Killing orphaned subprocess {task['child_pid']} from old CLI instance")
+                kill_process_tree(task["child_pid"])
 
-        conn.execute("DELETE FROM queue WHERE id = ?", (task["id"],))
-        log_metric(
-            paths,
-            "orphan_cleared",
-            task_id=task["id"],
-            queue_name=queue_name,
-            status=task["status"],
-            old_instance_id=task["server_id"],
-            reason="stale_cli_instance",
-        )
-        print(f"[tq] WARNING: Cleared task from old CLI instance (ID: {task['id']}, old_instance: {task['server_id']})")
+            conn.execute("DELETE FROM queue WHERE id = ?", (task["id"],))
+            log_metric(
+                paths,
+                "orphan_cleared",
+                task_id=task["id"],
+                queue_name=target_queue,
+                status=task["status"],
+                old_instance_id=task["server_id"],
+                reason="stale_cli_instance",
+            )
+            print(f"[tq] WARNING: Cleared task from old CLI instance (ID: {task['id']}, old_instance: {task['server_id']})")
 
     if conn.in_transaction:
         conn.commit()
@@ -315,7 +322,7 @@ def wait_for_turn(conn, queue_name: str, task_id: int, paths: QueuePaths, queue_
 
     while True:
         try:
-            cleanup_queue(conn, queue_name, paths)
+            cleanup_queue(conn, queue_name, paths, queue_capacities)
 
             started, pos = attempt_task_start(
                 conn,
@@ -431,7 +438,7 @@ def cmd_run(args):
     try:
         # Run cleanup BEFORE inserting - this clears orphaned tasks that would otherwise
         # block the queue forever (since cleanup only runs during polling)
-        cleanup_queue(conn, queue_name, paths)
+        cleanup_queue(conn, queue_name, paths, queue_capacities)
 
         # Register task first so task_id is available for cleanup if interrupted
         task_id = register_task(conn, queue_name, paths, command=command)

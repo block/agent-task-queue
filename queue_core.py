@@ -148,6 +148,48 @@ def queue_scopes(queue_name: str) -> list[str]:
     return [QUEUE_SCOPE_SEPARATOR.join(parts[:idx]) for idx in range(1, len(parts) + 1)]
 
 
+def queue_names_in_scope(conn, scope: str) -> list[str]:
+    """Return queue names in a scope, including descendant queues."""
+    normalized_scope = normalize_queue_name(scope)
+    escaped_scope = escape_like_pattern(normalized_scope)
+    rows = conn.execute(
+        """SELECT DISTINCT queue_name
+           FROM queue
+           WHERE queue_name = ?
+              OR queue_name LIKE ? ESCAPE '\\'
+           ORDER BY queue_name""",
+        (normalized_scope, f"{escaped_scope}{QUEUE_SCOPE_SEPARATOR}%"),
+    ).fetchall()
+    return [row["queue_name"] for row in rows]
+
+
+def cleanup_targets_for_queue(
+    conn,
+    queue_name: str,
+    queue_capacities: dict[str, int] | None,
+) -> list[str]:
+    """Return queue names that should be reaped before capacity checks."""
+    normalized_queue = normalize_queue_name(queue_name)
+    targets = [normalized_queue]
+
+    if not queue_capacities:
+        return targets
+
+    for scope in queue_scopes(normalized_queue):
+        if scope not in queue_capacities:
+            continue
+        targets.extend(queue_names_in_scope(conn, scope))
+
+    seen: set[str] = set()
+    unique_targets: list[str] = []
+    for target in targets:
+        if target in seen:
+            continue
+        seen.add(target)
+        unique_targets.append(target)
+    return unique_targets
+
+
 def escape_like_pattern(value: str) -> str:
     """Escape SQLite LIKE wildcards in a literal scope name."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
