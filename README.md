@@ -48,14 +48,14 @@ uvx agent-task-queue@latest \
 ```
 
 ```python
-run_task("./gradlew connectedDebugAndroidTest", queue_name="gradle/emu-5557", env_vars="ANDROID_SERIAL=127.0.0.1:5557", ...)
-run_task("./gradlew connectedDebugAndroidTest", queue_name="gradle/emu-5559", env_vars="ANDROID_SERIAL=127.0.0.1:5559", ...)
+run_task("./gradlew assembleDebug assembleDebugAndroidTest", queue_name="gradle/build", ...)
+run_task("./gradlew connectedDebugAndroidTest -x assembleDebug -x assembleDebugAndroidTest", queue_name="gradle/emu-5557", env_vars="ANDROID_SERIAL=127.0.0.1:5557", ...)
+run_task("./gradlew connectedDebugAndroidTest -x assembleDebug -x assembleDebugAndroidTest", queue_name="gradle/emu-5559", env_vars="ANDROID_SERIAL=127.0.0.1:5559", ...)
 ```
 
-Queue capacities apply to each command for its entire lifetime. If a leaf command includes both
-Gradle build work and emulator execution, those phases stay coupled inside the same queue slot. To
-serialize shared build/prep work first and only fan out the emulator-specific phase, split that
-workflow into separate queued commands; see [Android Multi-Emulator Pattern](#android-multi-emulator-pattern).
+Queue capacities apply to each command for its entire lifetime. For Android-style workflows, that
+usually means queueing shared Gradle prep/build first, then fan out emulator-specific commands that
+reuse those outputs; see [Android Multi-Emulator Pattern](#android-multi-emulator-pattern).
 
 Configured capacities apply to a scope and all of its descendants. In the example above, the
 shared `gradle` scope allows at most two concurrent Gradle-backed tasks, while each emulator leaf
@@ -289,13 +289,8 @@ run_task(
 ### Android Multi-Emulator Pattern
 
 If your machine can safely run a small number of Gradle-backed device tests in parallel, use a
-shared Gradle scope plus one queue per emulator. The important limitation is that queue capacities
-only see whole commands, not phases inside a command. A single
-`./gradlew connectedDebugAndroidTest` invocation still holds one queue slot for both its assemble
-work and its device-test work.
-
-When you want to serialize shared Gradle prep but still fan out emulator execution, split the
-workflow into two queued steps.
+shared Gradle scope plus one queue per emulator. Because queue capacities only see whole commands,
+the practical pattern is to split shared Gradle prep/build from emulator-specific execution.
 
 First, queue the shared Gradle prep/build once:
 
