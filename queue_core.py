@@ -9,6 +9,7 @@ This module contains the shared logic used by both:
 import json
 import os
 import signal
+import shlex
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -374,12 +375,28 @@ def is_task_queue_process(pid: int) -> bool:
             return False
 
         cmdline = result.stdout.strip().lower()
-        return (
-            "task_queue" in cmdline
-            or "agent-task-queue" in cmdline
-            or "tq.py" in cmdline
-            or "pytest" in cmdline  # For pytest running tests
-        )
+        known_entrypoints = {
+            "task_queue",
+            "task_queue.py",
+            "agent-task-queue",
+            "tq",
+            "tq.py",
+            "pytest",
+        }
+
+        try:
+            argv = shlex.split(cmdline)
+        except ValueError:
+            argv = cmdline.split()
+
+        # Installed entrypoints appear as basenames like `tq`, while module launches often
+        # look like `python .../tq.py`, so inspect the first two argv entries before falling
+        # back to the broader historical substring checks.
+        for token in argv[:2]:
+            if Path(token).name in known_entrypoints:
+                return True
+
+        return "task_queue" in cmdline or "agent-task-queue" in cmdline
     except Exception:
         # If we can't check, assume valid (conservative - avoid false orphan cleanup)
         return True

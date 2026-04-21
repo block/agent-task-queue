@@ -6,6 +6,7 @@ Uses FastMCP's Client API for proper in-memory testing.
 import pytest
 import asyncio
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -15,6 +16,7 @@ os.environ["TASK_QUEUE_POLL_READY"] = "0.1"
 
 from datetime import datetime, timedelta
 from fastmcp import Client
+import queue_core
 import task_queue
 from task_queue import (
     mcp,
@@ -971,6 +973,23 @@ def test_orphan_cleanup_removes_untracked_task():
             "SELECT COUNT(*) as c FROM queue WHERE queue_name = 'untracked_orphan_test'"
         ).fetchone()["c"]
         assert count_after == 0, "Untracked task for our PID should be cleaned up"
+
+
+def test_is_task_queue_process_accepts_installed_tq_entrypoint(monkeypatch):
+    """Installed tq entrypoints should be treated as live queue owners."""
+    monkeypatch.setattr(queue_core, "is_process_alive", lambda pid: True)
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args[0],
+            0,
+            stdout="/Users/test/.local/bin/tq run echo hi\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert queue_core.is_task_queue_process(12345) is True
 
 
 def test_attempt_task_start_after_core_cleanup_commit_on_same_connection():
