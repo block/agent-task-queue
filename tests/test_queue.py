@@ -6,6 +6,7 @@ Uses FastMCP's Client API for proper in-memory testing.
 import pytest
 import asyncio
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -15,6 +16,8 @@ os.environ["TASK_QUEUE_POLL_READY"] = "0.1"
 
 from datetime import datetime, timedelta
 from fastmcp import Client
+import queue_core
+import task_queue
 from task_queue import (
     mcp,
     PATHS,
@@ -24,6 +27,11 @@ from task_queue import (
     clear_output_files,
     cleanup_queue,
     MAX_LOCK_AGE_MINUTES,
+)
+from queue_core import (
+    attempt_task_start,
+    cleanup_queue as cleanup_queue_core,
+    parse_queue_capacities,
 )
 
 # Use PATHS for database path
@@ -47,6 +55,12 @@ def clean_db():
     # Cleanup after test
     if DB_PATH.exists():
         DB_PATH.unlink()
+
+
+@pytest.fixture(autouse=True)
+def reset_queue_capacities(monkeypatch):
+    """Reset queue capacity overrides between tests."""
+    monkeypatch.setattr(task_queue, "QUEUE_CAPACITIES", {})
 
 
 @pytest.fixture
@@ -257,6 +271,153 @@ async def test_different_queues_isolation():
         )
         assert "SUCCESS" in str(result3)
         assert "Queue Alpha Again" in read_output_file(str(result3))
+
+
+@pytest.mark.asyncio
+async def test_parent_capacity_blocks_different_child_queues(monkeypatch):
+    """A parent scope with capacity 1 should serialize its child queues."""
+    monkeypatch.setattr(task_queue, "QUEUE_CAPACITIES", parse_queue_capacities(["gradle=1"]))
+
+    results = {}
+    end_times = {}
+    overall_start = time.time()
+
+    async def run_task_a():
+        client = Client(mcp)
+        async with client:
+            result = await client.call_tool(
+                "run_task",
+                {
+                    "command": "sleep 2 && echo 'EMU 5557 done'",
+                    "working_directory": "/tmp",
+                    "queue_name": "gradle/emu-5557",
+                },
+            )
+            end_times["A"] = time.time()
+            results["A"] = str(result)
+
+    async def run_task_b():
+        await asyncio.sleep(0.3)
+        client = Client(mcp)
+        async with client:
+            result = await client.call_tool(
+                "run_task",
+                {
+                    "command": "echo 'EMU 5559 done'",
+                    "working_directory": "/tmp",
+                    "queue_name": "gradle/emu-5559",
+                },
+            )
+            end_times["B"] = time.time()
+            results["B"] = str(result)
+
+    await asyncio.gather(run_task_a(), run_task_b())
+
+    assert "SUCCESS" in results["A"]
+    assert "SUCCESS" in results["B"]
+    assert "EMU 5557 done" in read_output_file(results["A"])
+    assert "EMU 5559 done" in read_output_file(results["B"])
+    assert time.time() - overall_start >= 1.8
+    assert end_times["B"] >= end_times["A"] - 0.3
+
+
+@pytest.mark.asyncio
+async def test_parent_capacity_preserves_fifo_within_child_queue(monkeypatch):
+    """A tighter parent scope should not let a younger child task jump the queue."""
+    monkeypatch.setattr(
+        task_queue,
+        "QUEUE_CAPACITIES",
+        parse_queue_capacities(["gradle=1", "gradle/emu-5557=2"]),
+    )
+
+    results = {}
+    end_times = {}
+
+    async def run_parent_blocker():
+        client = Client(mcp)
+        async with client:
+            result = await client.call_tool(
+                "run_task",
+                {
+                    "command": "sleep 2 && echo 'parent done'",
+                    "working_directory": "/tmp",
+                    "queue_name": "gradle/emu-5559",
+                },
+            )
+            results["parent"] = str(result)
+
+    async def run_older_child():
+        await asyncio.sleep(0.2)
+        client = Client(mcp)
+        async with client:
+            result = await client.call_tool(
+                "run_task",
+                {
+                    "command": "sleep 1 && echo 'older child done'",
+                    "working_directory": "/tmp",
+                    "queue_name": "gradle/emu-5557",
+                },
+            )
+            end_times["older"] = time.time()
+            results["older"] = str(result)
+
+    async def run_younger_child():
+        await asyncio.sleep(0.4)
+        client = Client(mcp)
+        async with client:
+            result = await client.call_tool(
+                "run_task",
+                {
+                    "command": "echo 'younger child done'",
+                    "working_directory": "/tmp",
+                    "queue_name": "gradle/emu-5557",
+                },
+            )
+            end_times["younger"] = time.time()
+            results["younger"] = str(result)
+
+    await asyncio.gather(run_parent_blocker(), run_older_child(), run_younger_child())
+
+    assert "SUCCESS" in results["older"]
+    assert "SUCCESS" in results["younger"]
+    assert "older child done" in read_output_file(results["older"])
+    assert "younger child done" in read_output_file(results["younger"])
+    assert end_times["older"] <= end_times["younger"]
+
+
+@pytest.mark.asyncio
+async def test_parent_capacity_allows_parallel_child_queues(monkeypatch):
+    """A parent scope with capacity 2 should allow two child queues to run together."""
+    monkeypatch.setattr(task_queue, "QUEUE_CAPACITIES", parse_queue_capacities(["gradle=2"]))
+
+    results = {}
+    end_times = {}
+    overall_start = time.time()
+
+    async def run_child(queue_name: str, result_key: str):
+        client = Client(mcp)
+        async with client:
+            result = await client.call_tool(
+                "run_task",
+                {
+                    "command": f"sleep 2 && echo '{queue_name} done'",
+                    "working_directory": "/tmp",
+                    "queue_name": queue_name,
+                },
+            )
+            end_times[result_key] = time.time()
+            results[result_key] = str(result)
+
+    await asyncio.gather(
+        run_child("gradle/emu-5557", "A"),
+        run_child("gradle/emu-5559", "B"),
+    )
+
+    total_elapsed = time.time() - overall_start
+    assert "SUCCESS" in results["A"]
+    assert "SUCCESS" in results["B"]
+    assert total_elapsed < 3.5
+    assert abs(end_times["A"] - end_times["B"]) < 1.0
 
 
 @pytest.mark.asyncio
@@ -814,6 +975,131 @@ def test_orphan_cleanup_removes_untracked_task():
         assert count_after == 0, "Untracked task for our PID should be cleaned up"
 
 
+def test_is_task_queue_process_accepts_installed_tq_entrypoint(monkeypatch):
+    """Installed tq entrypoints should be treated as live queue owners."""
+    monkeypatch.setattr(queue_core, "is_process_alive", lambda pid: True)
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args[0],
+            0,
+            stdout="/Users/test/.local/bin/tq run echo hi\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert queue_core.is_task_queue_process(12345) is True
+
+
+def test_attempt_task_start_after_core_cleanup_commit_on_same_connection():
+    """Callers can reuse the same connection after committing cleanup work."""
+    dead_pid = 999999999
+    my_pid = os.getpid()
+
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO queue (queue_name, status, pid, child_pid, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                "cleanup_transaction_test",
+                "running",
+                dead_pid,
+                None,
+                datetime.now().isoformat(),
+                datetime.now().isoformat(),
+            ),
+        )
+        cursor = conn.execute(
+            """INSERT INTO queue (queue_name, status, pid, child_pid, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                "cleanup_transaction_test",
+                "waiting",
+                my_pid,
+                None,
+                datetime.now().isoformat(),
+                datetime.now().isoformat(),
+            ),
+        )
+        task_id = cursor.lastrowid
+
+        cleanup_queue_core(conn, "cleanup_transaction_test", PATHS.metrics_path)
+        conn.commit()
+
+        started, queue_position = attempt_task_start(
+            conn,
+            task_id,
+            "cleanup_transaction_test",
+            {},
+            my_pid,
+        )
+
+        assert started is True
+        assert queue_position == 0
+
+
+def test_parent_scope_cleanup_reaps_stale_sibling_runner(monkeypatch):
+    """A stale sibling runner should not keep a parent scope permanently full."""
+    capacities = parse_queue_capacities(["gradle=1"])
+    monkeypatch.setattr(task_queue, "QUEUE_CAPACITIES", capacities)
+
+    dead_pid = 999999999
+    my_pid = os.getpid()
+
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO queue (queue_name, status, pid, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                "gradle/emu-5557",
+                "running",
+                dead_pid,
+                datetime.now().isoformat(),
+                datetime.now().isoformat(),
+            ),
+        )
+        cursor = conn.execute(
+            """INSERT INTO queue (queue_name, status, pid, server_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                "gradle/emu-5559",
+                "waiting",
+                my_pid,
+                task_queue.SERVER_INSTANCE_ID,
+                datetime.now().isoformat(),
+                datetime.now().isoformat(),
+            ),
+        )
+        task_id = cursor.lastrowid
+
+        with task_queue._active_task_ids_lock:
+            task_queue._active_task_ids.add(task_id)
+
+        try:
+            cleanup_queue(conn, "gradle/emu-5559")
+
+            started, queue_position = attempt_task_start(
+                conn,
+                task_id,
+                "gradle/emu-5559",
+                capacities,
+                my_pid,
+            )
+
+            remaining_sibling_runners = conn.execute(
+                "SELECT COUNT(*) AS c FROM queue WHERE queue_name = ? AND status = 'running'",
+                ("gradle/emu-5557",),
+            ).fetchone()["c"]
+
+            assert started is True
+            assert queue_position == 0
+            assert remaining_sibling_runners == 0
+        finally:
+            with task_queue._active_task_ids_lock:
+                task_queue._active_task_ids.discard(task_id)
+
+
 def test_stale_server_instance_cleanup():
     """Test that cleanup removes tasks from old server instances even if PID is reused.
 
@@ -881,6 +1167,13 @@ def test_parse_args_defaults():
         assert args.lock_timeout == 120
     finally:
         sys.argv = original_argv
+
+
+def test_should_parse_module_args_for_console_script():
+    """Installed entrypoints should parse module args; library imports should not."""
+    assert task_queue._should_parse_module_args("agent-task-queue", "task_queue") is True
+    assert task_queue._should_parse_module_args("task_queue.py", "task_queue") is True
+    assert task_queue._should_parse_module_args("pytest", "task_queue") is False
 
 
 def test_parse_args_data_dir():

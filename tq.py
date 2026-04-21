@@ -25,10 +25,14 @@ from queue_core import (
     init_db,
     ensure_db,
     cleanup_queue as _cleanup_queue,
+    cleanup_targets_for_queue,
     log_metric as _log_metric,
     release_lock,
     is_process_alive,
     kill_process_tree,
+    normalize_queue_name,
+    parse_queue_capacities,
+    attempt_task_start,
     POLL_INTERVAL_WAITING,
     DEFAULT_MAX_LOCK_AGE_MINUTES,
     DEFAULT_MAX_METRICS_SIZE_MB,
@@ -46,6 +50,11 @@ def get_paths(args) -> QueuePaths:
     else:
         data_dir = Path(os.environ.get("TASK_QUEUE_DATA_DIR", "/tmp/agent-task-queue"))
     return QueuePaths.from_data_dir(data_dir)
+
+
+def get_queue_capacities(args) -> dict[str, int]:
+    """Parse queue capacity overrides from CLI args."""
+    return parse_queue_capacities(getattr(args, "queue_capacity", []))
 
 
 def cmd_list(args):
@@ -249,34 +258,43 @@ def log_metric(paths: QueuePaths, event: str, **kwargs):
     _log_metric(paths.metrics_path, event, DEFAULT_MAX_METRICS_SIZE_MB, **kwargs)
 
 
-def cleanup_queue(conn, queue_name: str, paths: QueuePaths):
+def cleanup_queue(
+    conn,
+    queue_name: str,
+    paths: QueuePaths,
+    queue_capacities: dict[str, int] | None = None,
+):
     """Clean up queue (wrapper for CLI)."""
-    _cleanup_queue(conn, queue_name, paths.metrics_path, DEFAULT_MAX_LOCK_AGE_MINUTES)
+    for target_queue in cleanup_targets_for_queue(conn, queue_name, queue_capacities):
+        _cleanup_queue(conn, target_queue, paths.metrics_path, DEFAULT_MAX_LOCK_AGE_MINUTES)
 
-    # Additional cleanup: Tasks with our PID but DIFFERENT instance_id (from old CLI instance)
-    # This handles the edge case where PID is reused after CLI crash
-    my_pid = os.getpid()
-    stale_tasks = conn.execute(
-        "SELECT id, status, child_pid, server_id FROM queue WHERE queue_name = ? AND pid = ? AND server_id IS NOT NULL AND server_id != ?",
-        (queue_name, my_pid, CLI_INSTANCE_ID),
-    ).fetchall()
+        # Additional cleanup: Tasks with our PID but DIFFERENT instance_id (from old CLI instance)
+        # This handles the edge case where PID is reused after CLI crash
+        my_pid = os.getpid()
+        stale_tasks = conn.execute(
+            "SELECT id, status, child_pid, server_id FROM queue WHERE queue_name = ? AND pid = ? AND server_id IS NOT NULL AND server_id != ?",
+            (target_queue, my_pid, CLI_INSTANCE_ID),
+        ).fetchall()
 
-    for task in stale_tasks:
-        if task["child_pid"] and is_process_alive(task["child_pid"]):
-            print(f"[tq] WARNING: Killing orphaned subprocess {task['child_pid']} from old CLI instance")
-            kill_process_tree(task["child_pid"])
+        for task in stale_tasks:
+            if task["child_pid"] and is_process_alive(task["child_pid"]):
+                print(f"[tq] WARNING: Killing orphaned subprocess {task['child_pid']} from old CLI instance")
+                kill_process_tree(task["child_pid"])
 
-        conn.execute("DELETE FROM queue WHERE id = ?", (task["id"],))
-        log_metric(
-            paths,
-            "orphan_cleared",
-            task_id=task["id"],
-            queue_name=queue_name,
-            status=task["status"],
-            old_instance_id=task["server_id"],
-            reason="stale_cli_instance",
-        )
-        print(f"[tq] WARNING: Cleared task from old CLI instance (ID: {task['id']}, old_instance: {task['server_id']})")
+            conn.execute("DELETE FROM queue WHERE id = ?", (task["id"],))
+            log_metric(
+                paths,
+                "orphan_cleared",
+                task_id=task["id"],
+                queue_name=target_queue,
+                status=task["status"],
+                old_instance_id=task["server_id"],
+                reason="stale_cli_instance",
+            )
+            print(f"[tq] WARNING: Cleared task from old CLI instance (ID: {task['id']}, old_instance: {task['server_id']})")
+
+    if conn.in_transaction:
+        conn.commit()
 
 
 def register_task(conn, queue_name: str, paths: QueuePaths, command: str = None) -> int:
@@ -295,7 +313,7 @@ def register_task(conn, queue_name: str, paths: QueuePaths, command: str = None)
     return task_id
 
 
-def wait_for_turn(conn, queue_name: str, task_id: int, paths: QueuePaths) -> None:
+def wait_for_turn(conn, queue_name: str, task_id: int, paths: QueuePaths, queue_capacities: dict[str, int]) -> None:
     """Wait for the task's turn to run. Task must already be registered."""
     my_pid = os.getpid()
     queued_at = time.time()
@@ -303,41 +321,26 @@ def wait_for_turn(conn, queue_name: str, task_id: int, paths: QueuePaths) -> Non
     last_pos = -1
 
     while True:
-        cleanup_queue(conn, queue_name, paths)
+        try:
+            cleanup_queue(conn, queue_name, paths, queue_capacities)
 
-        runner = conn.execute(
-            "SELECT id FROM queue WHERE queue_name = ? AND status = 'running'",
-            (queue_name,),
-        ).fetchone()
+            started, pos = attempt_task_start(
+                conn,
+                task_id,
+                queue_name,
+                queue_capacities,
+                my_pid,
+            )
 
-        if runner:
-            pos = conn.execute(
-                "SELECT COUNT(*) as c FROM queue WHERE queue_name = ? AND status = 'waiting' AND id < ?",
-                (queue_name, task_id),
-            ).fetchone()["c"] + 1
+            if not started:
 
-            if pos != last_pos:
-                print(f"[tq] Position #{pos} in queue. Waiting...")
-                last_pos = pos
+                if pos != last_pos:
+                    print(f"[tq] Position #{pos} in queue. Waiting...")
+                    last_pos = pos
 
-            time.sleep(POLL_INTERVAL_WAITING)
-            continue
+                time.sleep(POLL_INTERVAL_WAITING)
+                continue
 
-        # Try to acquire lock atomically
-        cursor = conn.execute(
-            """UPDATE queue SET status = 'running', updated_at = ?, pid = ?
-               WHERE id = ? AND status = 'waiting'
-               AND NOT EXISTS (
-                   SELECT 1 FROM queue WHERE queue_name = ? AND status = 'running'
-               )
-               AND id = (
-                   SELECT MIN(id) FROM queue WHERE queue_name = ? AND status = 'waiting'
-               )""",
-            (datetime.now().isoformat(), my_pid, task_id, queue_name, queue_name),
-        )
-        conn.commit()
-
-        if cursor.rowcount > 0:
             wait_time = time.time() - queued_at
             log_metric(
                 paths,
@@ -351,6 +354,9 @@ def wait_for_turn(conn, queue_name: str, task_id: int, paths: QueuePaths) -> Non
             else:
                 print("[tq] Lock acquired")
             return  # Lock acquired, task_id was passed in
+        except sqlite3.OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
 
         time.sleep(POLL_INTERVAL_WAITING)
 
@@ -364,7 +370,13 @@ def cmd_run(args):
     # Use shlex.join to properly quote arguments with spaces
     command = shlex.join(args.run_command)
     working_dir = os.path.abspath(args.dir) if args.dir else os.getcwd()
-    queue_name = args.queue
+    try:
+        queue_name = normalize_queue_name(args.queue)
+        queue_capacities = get_queue_capacities(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
     timeout = args.timeout
 
     if not os.path.exists(working_dir):
@@ -426,11 +438,11 @@ def cmd_run(args):
     try:
         # Run cleanup BEFORE inserting - this clears orphaned tasks that would otherwise
         # block the queue forever (since cleanup only runs during polling)
-        cleanup_queue(conn, queue_name, paths)
+        cleanup_queue(conn, queue_name, paths, queue_capacities)
 
         # Register task first so task_id is available for cleanup if interrupted
         task_id = register_task(conn, queue_name, paths, command=command)
-        wait_for_turn(conn, queue_name, task_id, paths)
+        wait_for_turn(conn, queue_name, task_id, paths, queue_capacities)
 
         print(f"[tq] Running: {command}")
         print(f"[tq] Directory: {working_dir}")
@@ -531,6 +543,16 @@ def main():
         "--data-dir",
         help="Data directory (default: $TASK_QUEUE_DATA_DIR or /tmp/agent-task-queue)",
     )
+    parser.add_argument(
+        "--queue-capacity",
+        action="append",
+        default=[],
+        metavar="SCOPE=CAPACITY",
+        help=(
+            "Hierarchical queue capacity override. Repeatable. "
+            "Example: --queue-capacity=gradle=2 --queue-capacity=gradle/emu-5557=1"
+        ),
+    )
 
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
@@ -564,8 +586,8 @@ def main():
     i = 0
     while i < len(args_list):
         arg = args_list[i]
-        if arg.startswith("--data-dir"):
-            # Skip --data-dir=value or --data-dir value
+        if arg.startswith("--data-dir") or arg.startswith("--queue-capacity"):
+            # Skip --data-dir=value, --queue-capacity=value, or the following value.
             if "=" not in arg:
                 i += 1  # Skip the next arg (value)
             i += 1

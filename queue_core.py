@@ -9,6 +9,7 @@ This module contains the shared logic used by both:
 import json
 import os
 import signal
+import shlex
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -19,9 +20,9 @@ from pathlib import Path
 # --- Configuration ---
 DEFAULT_DATA_DIR = Path(os.environ.get("TASK_QUEUE_DATA_DIR", "/tmp/agent-task-queue"))
 POLL_INTERVAL_WAITING = float(os.environ.get("TASK_QUEUE_POLL_WAITING", "1"))
-POLL_INTERVAL_READY = float(os.environ.get("TASK_QUEUE_POLL_READY", "1"))
 DEFAULT_MAX_LOCK_AGE_MINUTES = 120
 DEFAULT_MAX_METRICS_SIZE_MB = 5
+QUEUE_SCOPE_SEPARATOR = "/"
 
 
 @dataclass
@@ -105,6 +106,221 @@ def init_db(paths: QueuePaths):
                 pass  # Column already exists
 
 
+def normalize_queue_name(queue_name: str) -> str:
+    """Collapse redundant separators and whitespace in queue names."""
+    parts = [part.strip() for part in queue_name.split(QUEUE_SCOPE_SEPARATOR) if part.strip()]
+    if not parts:
+        raise ValueError("queue_name must contain at least one non-empty segment")
+    return QUEUE_SCOPE_SEPARATOR.join(parts)
+
+
+def parse_queue_capacities(capacity_args: list[str] | None) -> dict[str, int]:
+    """Parse repeated scope=capacity CLI arguments into a normalized map."""
+    capacities: dict[str, int] = {}
+    for arg in capacity_args or []:
+        if "=" not in arg:
+            raise ValueError(
+                f"Invalid --queue-capacity value '{arg}'. Expected SCOPE=CAPACITY."
+            )
+
+        scope, raw_capacity = arg.split("=", 1)
+        scope = normalize_queue_name(scope)
+        try:
+            capacity = int(raw_capacity)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid capacity '{raw_capacity}' for scope '{scope}'. Expected a positive integer."
+            ) from exc
+
+        if capacity < 1:
+            raise ValueError(
+                f"Invalid capacity '{capacity}' for scope '{scope}'. Capacity must be >= 1."
+            )
+
+        capacities[scope] = capacity
+
+    return capacities
+
+
+def queue_scopes(queue_name: str) -> list[str]:
+    """Return hierarchical scopes from broadest to most specific."""
+    normalized = normalize_queue_name(queue_name)
+    parts = normalized.split(QUEUE_SCOPE_SEPARATOR)
+    return [QUEUE_SCOPE_SEPARATOR.join(parts[:idx]) for idx in range(1, len(parts) + 1)]
+
+
+def queue_names_in_scope(conn, scope: str) -> list[str]:
+    """Return queue names in a scope, including descendant queues."""
+    normalized_scope = normalize_queue_name(scope)
+    escaped_scope = escape_like_pattern(normalized_scope)
+    rows = conn.execute(
+        """SELECT DISTINCT queue_name
+           FROM queue
+           WHERE queue_name = ?
+              OR queue_name LIKE ? ESCAPE '\\'
+           ORDER BY queue_name""",
+        (normalized_scope, f"{escaped_scope}{QUEUE_SCOPE_SEPARATOR}%"),
+    ).fetchall()
+    return [row["queue_name"] for row in rows]
+
+
+def cleanup_targets_for_queue(
+    conn,
+    queue_name: str,
+    queue_capacities: dict[str, int] | None,
+) -> list[str]:
+    """Return queue names that should be reaped before capacity checks."""
+    normalized_queue = normalize_queue_name(queue_name)
+    targets = [normalized_queue]
+
+    if not queue_capacities:
+        return targets
+
+    for scope in queue_scopes(normalized_queue):
+        if scope not in queue_capacities:
+            continue
+        targets.extend(queue_names_in_scope(conn, scope))
+
+    seen: set[str] = set()
+    unique_targets: list[str] = []
+    for target in targets:
+        if target in seen:
+            continue
+        seen.add(target)
+        unique_targets.append(target)
+    return unique_targets
+
+
+def escape_like_pattern(value: str) -> str:
+    """Escape SQLite LIKE wildcards in a literal scope name."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def count_running_in_scope(conn, scope: str) -> int:
+    """Count running tasks in a scope, including descendant queues."""
+    escaped_scope = escape_like_pattern(scope)
+    row = conn.execute(
+        """SELECT COUNT(*) AS c
+           FROM queue
+           WHERE status = 'running'
+             AND (queue_name = ? OR queue_name LIKE ? ESCAPE '\\')""",
+        (scope, f"{escaped_scope}{QUEUE_SCOPE_SEPARATOR}%"),
+    ).fetchone()
+    return row["c"]
+
+
+def count_running_in_queue(conn, queue_name: str) -> int:
+    """Count running tasks in the exact queue only."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM queue WHERE queue_name = ? AND status = 'running'",
+        (queue_name,),
+    ).fetchone()
+    return row["c"]
+
+
+def count_waiting_ahead(conn, queue_name: str, task_id: int) -> int:
+    """Count older waiting tasks in the exact queue."""
+    row = conn.execute(
+        """SELECT COUNT(*) AS c
+           FROM queue
+           WHERE queue_name = ?
+             AND status = 'waiting'
+             AND id < ?""",
+        (queue_name, task_id),
+    ).fetchone()
+    return row["c"]
+
+
+def can_acquire_task(
+    conn,
+    task_id: int,
+    queue_name: str,
+    queue_capacities: dict[str, int],
+    waiting_ahead: int | None = None,
+) -> bool:
+    """Return True when the task can start without violating queue capacities."""
+    normalized_queue = normalize_queue_name(queue_name)
+    scopes = queue_scopes(normalized_queue)
+
+    exact_capacity = queue_capacities.get(normalized_queue, 1)
+    if normalized_queue in queue_capacities:
+        available_slots = exact_capacity - count_running_in_scope(conn, normalized_queue)
+    else:
+        available_slots = exact_capacity - count_running_in_queue(conn, normalized_queue)
+
+    for scope in scopes:
+        if scope not in queue_capacities or scope == normalized_queue:
+            continue
+        available_slots = min(
+            available_slots,
+            queue_capacities[scope] - count_running_in_scope(conn, scope),
+        )
+
+    if available_slots <= 0:
+        return False
+
+    if waiting_ahead is None:
+        waiting_ahead = count_waiting_ahead(conn, normalized_queue, task_id)
+
+    if waiting_ahead >= available_slots:
+        return False
+
+    return True
+
+
+def attempt_task_start(
+    conn,
+    task_id: int,
+    queue_name: str,
+    queue_capacities: dict[str, int],
+    owner_pid: int,
+) -> tuple[bool, int]:
+    """Attempt to transition a waiting task into running state.
+
+    Returns:
+        Tuple of (started, queue_position). queue_position is only meaningful when started is False.
+    """
+    previous_busy_timeout = None
+
+    try:
+        previous_busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        conn.execute("PRAGMA busy_timeout=100")
+        conn.execute("BEGIN IMMEDIATE")
+        waiting_ahead = count_waiting_ahead(conn, queue_name, task_id)
+
+        if not can_acquire_task(
+            conn,
+            task_id,
+            queue_name,
+            queue_capacities,
+            waiting_ahead=waiting_ahead,
+        ):
+            position = waiting_ahead + 1
+            conn.commit()
+            return False, position
+
+        cursor = conn.execute(
+            """UPDATE queue SET status = 'running', updated_at = ?, pid = ?
+               WHERE id = ? AND status = 'waiting'""",
+            (datetime.now().isoformat(), owner_pid, task_id),
+        )
+        if cursor.rowcount > 0:
+            conn.commit()
+            return True, 0
+
+        position = waiting_ahead + 1
+        conn.commit()
+        return False, position
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        if previous_busy_timeout is not None:
+            # SQLite PRAGMA statements do not support bound parameters.
+            conn.execute("PRAGMA busy_timeout=" + str(int(previous_busy_timeout)))
+
+
 def ensure_db(paths: QueuePaths):
     """Ensure database exists and is valid. Recreates if corrupted."""
     try:
@@ -159,12 +375,28 @@ def is_task_queue_process(pid: int) -> bool:
             return False
 
         cmdline = result.stdout.strip().lower()
-        return (
-            "task_queue" in cmdline
-            or "agent-task-queue" in cmdline
-            or "tq.py" in cmdline
-            or "pytest" in cmdline  # For pytest running tests
-        )
+        known_entrypoints = {
+            "task_queue",
+            "task_queue.py",
+            "agent-task-queue",
+            "tq",
+            "tq.py",
+            "pytest",
+        }
+
+        try:
+            argv = shlex.split(cmdline)
+        except ValueError:
+            argv = cmdline.split()
+
+        # Installed entrypoints appear as basenames like `tq`, while module launches often
+        # look like `python .../tq.py`, so inspect the first two argv entries before falling
+        # back to the broader historical substring checks.
+        for token in argv[:2]:
+            if Path(token).name in known_entrypoints:
+                return True
+
+        return "task_queue" in cmdline or "agent-task-queue" in cmdline
     except Exception:
         # If we can't check, assume valid (conservative - avoid false orphan cleanup)
         return True

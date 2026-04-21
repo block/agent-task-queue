@@ -37,6 +37,33 @@ run_task("npm run build", queue_name="web", ...)
 
 Both agents block until their respective builds complete. The server handles sequencing automatically.
 
+**Hierarchical queues** - Use `/`-delimited queue names plus `--queue-capacity` when you need
+parallelism with a shared cap:
+
+```bash
+uvx agent-task-queue@latest \
+  --queue-capacity=gradle=2 \
+  --queue-capacity=gradle/emu-5557=1 \
+  --queue-capacity=gradle/emu-5559=1
+```
+
+```python
+run_task("./gradlew assembleDebug assembleDebugAndroidTest", queue_name="gradle/build", ...)
+run_task("./gradlew connectedDebugAndroidTest -x assembleDebug -x assembleDebugAndroidTest", queue_name="gradle/emu-5557", env_vars="ANDROID_SERIAL=127.0.0.1:5557", ...)
+run_task("./gradlew connectedDebugAndroidTest -x assembleDebug -x assembleDebugAndroidTest", queue_name="gradle/emu-5559", env_vars="ANDROID_SERIAL=127.0.0.1:5559", ...)
+```
+
+Queue capacities apply to each command for its entire lifetime. For Android-style workflows, that
+usually means queueing shared Gradle prep/build first, then fan out emulator-specific commands that
+reuse those outputs; see [Android Multi-Emulator Pattern](#android-multi-emulator-pattern).
+
+Configured capacities apply to a scope and all of its descendants. In the example above, the
+shared `gradle` scope allows at most two concurrent Gradle-backed tasks, while each emulator leaf
+queue remains exclusive. If multiple servers or `tq` CLI invocations share the same data
+directory, start them with matching `--queue-capacity` flags; these overrides are process-local and
+are not persisted in `queue.db`. If you do not configure any capacities, behavior is unchanged:
+each exact `queue_name` is still a FIFO queue with capacity 1.
+
 ## Demo: Two Agents, One Build Queue
 
 **Terminal A** - First agent requests an Android build:
@@ -86,7 +113,7 @@ With the queue:
 
 ## Key Features
 
-- **FIFO Queuing**: Strict first-in-first-out ordering
+- **FIFO Queuing**: Strict first-in-first-out ordering within each exact `queue_name`
 - **No Queue Timeouts**: MCP keeps connection alive while waiting in queue. The `timeout_seconds` parameter only applies to execution time—tasks can wait in queue indefinitely without timing out. (see [Why MCP?](#why-mcp-instead-of-a-cli-tool))
 - **Environment Variables**: Pass `env_vars="ANDROID_SERIAL=emulator-5560"`
 - **Multiple Queues**: Isolate different workloads with `queue_name`
@@ -242,6 +269,12 @@ Agents use the `run_task` MCP tool for expensive operations:
 | `timeout_seconds` | No | Max **execution** time before kill (default: 1200). Queue wait time doesn't count. |
 | `env_vars` | No | Environment variables: `"KEY=val,KEY2=val2"` |
 
+`queue_name` may be hierarchical, such as `gradle/emu-5557`, when the server is configured with
+`--queue-capacity` scopes.
+
+Sibling queues that share a parent scope compete for that parent capacity on a best-effort basis;
+FIFO ordering is guaranteed within each exact queue, not across sibling queues.
+
 ### Example
 
 ```
@@ -252,6 +285,52 @@ run_task(
     env_vars="ANDROID_SERIAL=emulator-5560"
 )
 ```
+
+### Android Multi-Emulator Pattern
+
+If your machine can safely run a small number of Gradle-backed device tests in parallel, use a
+shared Gradle scope plus one queue per emulator. Because queue capacities only see whole commands,
+the practical pattern is to split shared Gradle prep/build from emulator-specific execution.
+
+First, queue the shared Gradle prep/build once:
+
+```python
+run_task(
+    command="./gradlew assembleDebug assembleDebugAndroidTest",
+    working_directory="/project",
+    queue_name="gradle/build",
+)
+```
+
+Then fan out one task per emulator using a command that reuses those prebuilt outputs:
+
+```bash
+uvx agent-task-queue@latest \
+  --queue-capacity=gradle=2 \
+  --queue-capacity=gradle/emu-5557=1 \
+  --queue-capacity=gradle/emu-5559=1 \
+  --queue-capacity=gradle/emu-5561=1
+```
+
+Then pin each task to the matching queue and `ANDROID_SERIAL`:
+
+```python
+run_task(
+    command="./gradlew connectedDebugAndroidTest -x assembleDebug -x assembleDebugAndroidTest",
+    working_directory="/project",
+    queue_name="gradle/emu-5557",
+    env_vars="ANDROID_SERIAL=127.0.0.1:5557",
+)
+```
+
+Adapt the exact Gradle tasks and `-x` exclusions to your project. The key is that the second step
+must reuse the outputs from the shared prep step instead of rebuilding them in every emulator queue.
+
+If your emulator execution phase no longer needs Gradle at all, queue it outside the shared
+`gradle` scope entirely so only the build/prep step consumes shared Gradle capacity.
+
+When multiple entrypoints share this queue database, they must all use the same
+`--queue-capacity` configuration for the shared parent caps to mean the same thing.
 
 ### Agent Configuration Notes
 
@@ -295,6 +374,7 @@ The server supports the following command-line options:
 | `--max-output-files` | `50` | Number of task output files to retain |
 | `--tail-lines` | `50` | Lines of output to include on failure |
 | `--lock-timeout` | `120` | Minutes before stale locks are cleared |
+| `--queue-capacity` | none | Repeatable `scope=capacity` override for hierarchical queue names |
 
 Pass options via the `args` property in your MCP config:
 
@@ -306,7 +386,9 @@ Pass options via the `args` property in your MCP config:
       "args": [
         "agent-task-queue@latest",
         "--max-output-files=100",
-        "--lock-timeout=60"
+        "--lock-timeout=60",
+        "--queue-capacity=gradle=2",
+        "--queue-capacity=gradle/emu-5557=1"
       ]
     }
   }

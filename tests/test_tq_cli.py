@@ -6,6 +6,7 @@ Tests the command-line interface for running tasks and inspecting the queue.
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -40,6 +41,37 @@ def run_tq(*args, data_dir=None, cwd=None, timeout=30):
         timeout=timeout,
     )
     return result
+
+
+def wait_for_queue_rows(db_path: Path, status: str, expected_count: int, timeout: float = 5.0):
+    """Poll until the queue has the expected number of rows with the given status."""
+    deadline = time.time() + timeout
+    last_error = None
+
+    while time.time() < deadline:
+        try:
+            conn = sqlite3.connect(db_path, timeout=5.0)
+            conn.row_factory = sqlite3.Row
+            try:
+                count = conn.execute(
+                    "SELECT COUNT(*) as c FROM queue WHERE status = ?",
+                    (status,),
+                ).fetchone()["c"]
+            finally:
+                conn.close()
+
+            if count == expected_count:
+                return
+        except sqlite3.OperationalError as exc:
+            last_error = exc
+
+        time.sleep(0.05)
+
+    if last_error is not None:
+        raise last_error
+    raise AssertionError(
+        f"Timed out waiting for {expected_count} queue rows with status={status!r}"
+    )
 
 
 class TestTqRun:
@@ -81,6 +113,33 @@ class TestTqRun:
 
         assert result.returncode == 0
         assert "queued in 'longqueue'" in result.stdout
+
+    def test_queue_capacity_option(self, temp_data_dir):
+        """Test global --queue-capacity option with implicit run mode."""
+        result = run_tq(
+            "--queue-capacity=gradle=2",
+            "-q",
+            "gradle/emu-5557",
+            "echo",
+            "capacity test",
+            data_dir=temp_data_dir,
+        )
+
+        assert result.returncode == 0
+        assert "queued in 'gradle/emu-5557'" in result.stdout
+        assert "[tq] SUCCESS" in result.stdout
+
+    def test_invalid_queue_capacity_option(self, temp_data_dir):
+        """Test invalid --queue-capacity value is rejected."""
+        result = run_tq(
+            "--queue-capacity=gradle=abc",
+            "echo",
+            "oops",
+            data_dir=temp_data_dir,
+        )
+
+        assert result.returncode == 1
+        assert "Invalid capacity 'abc'" in result.stderr
 
     def test_working_directory_option(self, temp_data_dir):
         """Test -C/--dir option."""
@@ -508,7 +567,6 @@ class TestSignalHandling:
         import os
         import signal
         import sqlite3
-        import time
 
         db_path = Path(temp_data_dir) / "queue.db"
 
@@ -577,7 +635,6 @@ class TestSignalHandling:
         import os
         import signal
         import sqlite3
-        import time
 
         db_path = Path(temp_data_dir) / "queue.db"
 
@@ -590,7 +647,7 @@ class TestSignalHandling:
         )
 
         # Wait for it to start running
-        time.sleep(0.5)
+        wait_for_queue_rows(db_path, "running", 1)
 
         # Verify it's running
         conn = sqlite3.connect(db_path, timeout=5.0)
@@ -647,7 +704,7 @@ class TestSignalHandling:
             start_new_session=True,
         )
 
-        time.sleep(0.5)
+        wait_for_queue_rows(db_path, "running", 1)
 
         # Start multiple waiters
         waiters = []
@@ -662,6 +719,7 @@ class TestSignalHandling:
             time.sleep(0.2)  # Stagger registration
 
         # Verify all waiters are in queue
+        wait_for_queue_rows(db_path, "waiting", 3)
         conn = sqlite3.connect(db_path, timeout=5.0)
         conn.row_factory = sqlite3.Row
         waiting_count = conn.execute(
