@@ -52,6 +52,11 @@ run_task("./gradlew connectedDebugAndroidTest", queue_name="gradle/emu-5557", en
 run_task("./gradlew connectedDebugAndroidTest", queue_name="gradle/emu-5559", env_vars="ANDROID_SERIAL=127.0.0.1:5559", ...)
 ```
 
+Queue capacities apply to each command for its entire lifetime. If a leaf command includes both
+Gradle build work and emulator execution, those phases stay coupled inside the same queue slot. To
+serialize shared build/prep work first and only fan out the emulator-specific phase, split that
+workflow into separate queued commands; see [Android Multi-Emulator Pattern](#android-multi-emulator-pattern).
+
 Configured capacities apply to a scope and all of its descendants. In the example above, the
 shared `gradle` scope allows at most two concurrent Gradle-backed tasks, while each emulator leaf
 queue remains exclusive. If multiple servers or `tq` CLI invocations share the same data
@@ -284,7 +289,25 @@ run_task(
 ### Android Multi-Emulator Pattern
 
 If your machine can safely run a small number of Gradle-backed device tests in parallel, use a
-shared Gradle scope plus one queue per emulator:
+shared Gradle scope plus one queue per emulator. The important limitation is that queue capacities
+only see whole commands, not phases inside a command. A single
+`./gradlew connectedDebugAndroidTest` invocation still holds one queue slot for both its assemble
+work and its device-test work.
+
+When you want to serialize shared Gradle prep but still fan out emulator execution, split the
+workflow into two queued steps.
+
+First, queue the shared Gradle prep/build once:
+
+```python
+run_task(
+    command="./gradlew assembleDebug assembleDebugAndroidTest",
+    working_directory="/project",
+    queue_name="gradle/build",
+)
+```
+
+Then fan out one task per emulator using a command that reuses those prebuilt outputs:
 
 ```bash
 uvx agent-task-queue@latest \
@@ -298,12 +321,18 @@ Then pin each task to the matching queue and `ANDROID_SERIAL`:
 
 ```python
 run_task(
-    command="./gradlew connectedDebugAndroidTest",
+    command="./gradlew connectedDebugAndroidTest -x assembleDebug -x assembleDebugAndroidTest",
     working_directory="/project",
     queue_name="gradle/emu-5557",
     env_vars="ANDROID_SERIAL=127.0.0.1:5557",
 )
 ```
+
+Adapt the exact Gradle tasks and `-x` exclusions to your project. The key is that the second step
+must reuse the outputs from the shared prep step instead of rebuilding them in every emulator queue.
+
+If your emulator execution phase no longer needs Gradle at all, queue it outside the shared
+`gradle` scope entirely so only the build/prep step consumes shared Gradle capacity.
 
 When multiple entrypoints share this queue database, they must all use the same
 `--queue-capacity` configuration for the shared parent caps to mean the same thing.
