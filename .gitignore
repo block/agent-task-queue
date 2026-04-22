@@ -37,3 +37,7 @@ thoughts/
 # IntelliJ Plugin
 intellij-plugin/build/
 intellij-plugin/.gradle/
+
+# Desktop sidecar
+desktop-sidecar/build/
+desktop-sidecar/.gradle/
