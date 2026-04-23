@@ -120,6 +120,32 @@ With the queue:
 - **Zombie Protection**: Detects dead processes, kills orphans, clears stale locks
 - **Auto-Kill**: Tasks running > 120 minutes are terminated
 
+## Desktop Sidecar
+
+The repo also includes a minimal Compose Multiplatform desktop app in [desktop-sidecar](desktop-sidecar/README.md) for watching the queue in real time.
+
+It reads the same local SQLite database as `tq` and the IntelliJ plugin, then shows:
+
+- running tasks
+- waiting tasks
+- exact queues grouped by their root scope (for example `gradle/build` and `gradle/emulator-5554` under `gradle`)
+
+Run it with:
+
+```bash
+cd desktop-sidecar
+./gradlew run
+```
+
+Or point it at a different queue data directory:
+
+```bash
+cd desktop-sidecar
+./gradlew run --args="--data-dir /path/to/agent-task-queue"
+```
+
+The sidecar defaults to `$TASK_QUEUE_DATA_DIR` or `/tmp/agent-task-queue`. It visualizes live occupancy from `queue.db`; configured `--queue-capacity` limits are process-local and are not stored in SQLite, so the UI shows live tasks and queue topology rather than persisted capacity settings.
+
 ## Installation
 
 ```bash
