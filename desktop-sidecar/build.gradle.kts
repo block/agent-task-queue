@@ -23,6 +23,12 @@ kotlin {
                 implementation("org.xerial:sqlite-jdbc:3.53.0.0")
             }
         }
+
+        val desktopTest by getting {
+            dependencies {
+                implementation(kotlin("test"))
+            }
+        }
     }
 }
 

@@ -4,6 +4,7 @@ import java.nio.file.Path
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
+import java.time.ZoneId
 import java.time.ZoneOffset
 
 data class QueueTask(
@@ -21,7 +22,7 @@ data class QueueTask(
 
     fun statusAge(now: Instant = Instant.now()): String {
         val reference = when (status.lowercase()) {
-            "running" -> parseQueueInstant(updatedAt) ?: parseQueueInstant(createdAt)
+            "running" -> parseQueueInstant(updatedAt, ZoneId.systemDefault()) ?: parseQueueInstant(createdAt)
             else -> parseQueueInstant(createdAt)
         } ?: return "time unknown"
 
@@ -112,14 +113,14 @@ data class QueueSnapshot(
     }
 }
 
-fun parseQueueInstant(raw: String?): Instant? {
+fun parseQueueInstant(raw: String?, defaultZone: ZoneId = ZoneOffset.UTC): Instant? {
     if (raw.isNullOrBlank()) {
         return null
     }
 
     val normalized = raw.replace(" ", "T")
     return runCatching {
-        LocalDateTime.parse(normalized).toInstant(ZoneOffset.UTC)
+        LocalDateTime.parse(normalized).atZone(defaultZone).toInstant()
     }.getOrNull()
 }
 
