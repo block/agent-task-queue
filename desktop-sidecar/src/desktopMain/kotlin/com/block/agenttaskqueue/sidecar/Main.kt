@@ -1,38 +1,41 @@
 package com.block.agenttaskqueue.sidecar
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.lightColorScheme
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,9 +45,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
@@ -54,31 +60,65 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.nio.file.Path
 import java.nio.file.Paths
+import kotlin.math.max
 import kotlin.system.exitProcess
 
 private const val ACTIVE_INTERVAL_MS = 1000L
 private const val IDLE_INTERVAL_MS = 3000L
 
-private val ScopeAccent = Color(0xFF305B78)
-private val RunningAccent = Color(0xFFC96A3D)
-private val WaitingAccent = Color(0xFF3F7698)
-private val LaneAccent = Color(0xFF46705C)
-private val WarningAccent = Color(0xFFB35C33)
-private val ScopeCardColor = Color(0xFFFFFBF6)
-private val LaneCardColor = Color(0xFFFFFDF9)
+// Neutral surfaces
+private val Background = Color(0xFFF4EEE5)
+private val BackgroundGradientEnd = Color(0xFFEDE3D4)
+private val SurfaceCard = Color(0xFFFFFCF7)
+private val SurfaceElevated = Color(0xFFFFFFFF)
+private val DividerColor = Color(0x14000000)
+
+// Text
+private val TextPrimary = Color(0xFF1F262D)
+private val TextSecondary = Color(0xFF5E6670)
+private val TextMuted = Color(0xFF8A9099)
+
+// Status accents
+private val AccentRunning = Color(0xFFC96A3D)
+private val AccentWaiting = Color(0xFF3F7698)
+private val AccentSuccess = Color(0xFF4E8A5A)
+private val AccentWarning = Color(0xFFD08A2E)
+private val AccentDanger = Color(0xFFB8472E)
+private val AccentIdle = Color(0xFFB0A99E)
+
 private val TooltipColor = Color(0xFF2B2F35)
+
+// Stable per-agent color palette so a developer running multiple agents can
+// visually pick out "which agent is that" at a glance.
+private val AgentPalette = linkedMapOf(
+    "Amp" to Color(0xFF2A7E76),
+    "Claude" to Color(0xFFB8742E),
+    "Codex" to Color(0xFF6B4AA8),
+    "Cursor" to Color(0xFFA83F6C),
+    "Zed" to Color(0xFF2E6BA8),
+    "Windsurf" to Color(0xFF5E8A2E),
+)
+private val UnknownAgentColor = Color(0xFF5A6370)
+
+private fun agentColor(label: String?): Color {
+    if (label.isNullOrBlank()) return UnknownAgentColor
+    AgentPalette.forEach { (name, color) ->
+        if (label.startsWith(name, ignoreCase = true)) return color
+    }
+    return UnknownAgentColor
+}
 
 private val DashboardColors = lightColorScheme(
     primary = Color(0xFF305B78),
-    secondary = Color(0xFFB35C33),
-    tertiary = Color(0xFF46705C),
-    background = Color(0xFFF7F1E8),
-    surface = Color(0xFFFFFCF8),
-    surfaceVariant = Color(0xFFE9DFCf),
-    onBackground = Color(0xFF1F262D),
-    onSurface = Color(0xFF1F262D),
+    secondary = AccentRunning,
+    tertiary = AccentSuccess,
+    background = Background,
+    surface = SurfaceCard,
+    surfaceVariant = Color(0xFFE9DFCF),
+    onBackground = TextPrimary,
+    onSurface = TextPrimary,
     outline = Color(0xFF877F74),
-    error = Color(0xFF8D2C2C),
+    error = AccentDanger,
 )
 
 fun main(args: Array<String>) = application {
@@ -87,7 +127,7 @@ fun main(args: Array<String>) = application {
     Window(
         onCloseRequest = ::exitApplication,
         title = "Agent Task Queue Sidecar",
-        state = rememberWindowState(width = 1320.dp, height = 900.dp),
+        state = rememberWindowState(width = 1440.dp, height = 920.dp),
     ) {
         MaterialTheme(colorScheme = DashboardColors) {
             QueueDashboard(dataDir = dataDir)
@@ -95,7 +135,6 @@ fun main(args: Array<String>) = application {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun QueueDashboard(dataDir: Path) {
     val refreshRequests = remember(dataDir) { Channel<Unit>(Channel.CONFLATED) }
@@ -114,549 +153,1160 @@ private fun QueueDashboard(dataDir: Path) {
     }
 
     Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text("Agent Task Queue", fontWeight = FontWeight.SemiBold)
-                        Text(
-                            text = snapshot.dataDir.toString(),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                },
-                actions = {
-                    Text(
-                        text = "Updated ${formatRefreshTime(snapshot.refreshedAt)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Button(onClick = { refreshRequests.trySend(Unit) }) {
-                        Text("Refresh")
-                    }
-                    Spacer(Modifier.width(16.dp))
-                },
-            )
-        },
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = { DashboardTopBar(snapshot) { refreshRequests.trySend(Unit) } },
     ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .background(
-                    Brush.verticalGradient(
-                        listOf(
-                            MaterialTheme.colorScheme.background,
-                            Color(0xFFF3ECE2),
-                        )
-                    )
+                    Brush.verticalGradient(listOf(Background, BackgroundGradientEnd))
                 )
-                .verticalScroll(rememberScrollState())
                 .padding(innerPadding)
-                .padding(horizontal = 22.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            snapshot.errorMessage?.let { ErrorBanner(it) }
-            snapshot.configuration.errorMessage?.let { ErrorBanner(it) }
-            snapshot.adb.errorMessage?.let { ErrorBanner(it) }
-            QueueFlowSection(snapshot)
-            EnvironmentDetailsSection(snapshot)
-
-            Text(
-                text = "Scopes own shared slots. Exact queues stay FIFO. Inline chips keep run vs wait local, while diagnostics below show which agent context owns each live server.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-            )
-        }
-    }
-}
-
-@Composable
-private fun QueueFlowSection(snapshot: QueueSnapshot) {
-    SectionCard(
-        title = "Queue Flow",
-        subtitle = "Scopes own shared capacity; exact queues keep FIFO order inside each lane.",
-    ) {
-        if (snapshot.scopeGroups.isEmpty()) {
-            Text(
-                text = snapshot.statusMessage ?: "No queues are visible yet.",
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-            )
-            return@SectionCard
-        }
-
-        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            snapshot.scopeGroups.forEach { scope ->
-                ScopeFlowCard(scope = scope, snapshot = snapshot)
-            }
-        }
-    }
-}
-
-@Composable
-private fun ScopeFlowCard(
-    scope: ScopeGroup,
-    snapshot: QueueSnapshot,
-) {
-    val rootUsage = snapshot.configuredScopeUsage.firstOrNull { it.scopeName == scope.scopeName }
-    val emulatorLanes = scope.lanes.filter { it.isEmulatorLike || it.configuredScope?.isEmulatorLike == true }
-    val matchedEmulators = emulatorLanes.count { lane -> lane.emulatorPort != null && lane.emulatorPort in snapshot.emulatorAlignment.matchedPorts }
-
-    Card(colors = CardDefaults.cardColors(containerColor = ScopeCardColor)) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+                .padding(horizontal = 20.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            HeroStatStrip(snapshot)
+            BannerStack(snapshot)
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Top,
+                modifier = Modifier.fillMaxWidth().weight(1f, fill = true),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(scope.scopeName, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        text = "${scope.lanes.size} lane(s) · ${scope.runningCount} running · ${scope.waitingCount} waiting",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
-                    )
-                    Row(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        MetaBadge(
-                            label = rootUsage?.let { "shared ${it.displayCapacityLabel}" } ?: "default per-lane",
-                            accent = ScopeAccent,
-                            filled = true,
-                        )
-                        val configuredDescendants = snapshot.configuredScopeUsage.count {
-                            it.scopeName != scope.scopeName && it.scopeName.startsWith("${scope.scopeName}/")
-                        }
-                        if (configuredDescendants > 0) {
-                            MetaBadge(
-                                label = "$configuredDescendants configured descendant lane(s)",
-                                accent = LaneAccent,
-                            )
-                        }
-                        if (emulatorLanes.isNotEmpty()) {
-                            MetaBadge(
-                                label = "ADB $matchedEmulators/${emulatorLanes.size} matched",
-                                accent = WarningAccent,
-                                tooltip = "Matches configured emulator queue lanes against connected `adb devices -l` emulator serials. A lane is matched when both advertise the same emulator port.",
-                            )
-                        }
-                    }
-                }
-
-                Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    SlotStrip(
-                        capacity = rootUsage?.capacity,
-                        usedSlots = rootUsage?.usedSlots ?: scope.runningCount,
-                        accent = ScopeAccent,
-                        fallbackLabel = if (rootUsage == null) "No shared cap configured" else null,
-                    )
-                }
-            }
-
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f))
-
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                scope.lanes
-                    .sortedWith(
-                        compareByDescending<QueueLane> { it.runningCount > 0 }
-                            .thenByDescending { it.waitingCount > 0 }
-                            .thenByDescending { it.configuredScope != null }
-                            .thenBy { it.queueName }
-                    )
-                    .forEach { lane ->
-                        LaneFlowRow(
-                            lane = lane,
-                            rootUsage = rootUsage,
-                            emulatorMatched = lane.emulatorPort != null && lane.emulatorPort in snapshot.emulatorAlignment.matchedPorts,
-                        )
-                    }
-            }
-        }
-    }
-}
-
-@Composable
-private fun LaneFlowRow(
-    lane: QueueLane,
-    rootUsage: ConfiguredScopeUsage?,
-    emulatorMatched: Boolean,
-) {
-    val runningTasks = lane.tasks.filter { it.status.equals("running", ignoreCase = true) }
-    val waitingTasks = lane.tasks.filter { it.status.equals("waiting", ignoreCase = true) }
-    val laneLabel = lane.queueName.substringAfterLast('/')
-    val fullPathNeeded = laneLabel != lane.queueName
-
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        color = LaneCardColor,
-        tonalElevation = 1.dp,
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.14f), RoundedCornerShape(16.dp))
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Top,
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(laneLabel, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                    if (fullPathNeeded) {
-                        Text(
-                            text = lane.queueName,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-
-                Text(
-                    text = "${runningTasks.size} running · ${waitingTasks.size} waiting",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                )
-            }
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                MetaBadge(
-                    label = when {
-                        lane.hasCapacityConflict -> "exact ${lane.configuredScope?.displayCapacityLabel}"
-                        lane.configuredCapacity != null -> "exact ${lane.configuredCapacity}"
-                        else -> "default 1"
-                    },
-                    accent = LaneAccent,
-                    filled = lane.configuredCapacity != null || lane.hasCapacityConflict,
-                )
-                rootUsage?.let {
-                    MetaBadge(
-                        label = "shares ${scopeLabel(it)}=${it.displayCapacityLabel}",
-                        accent = ScopeAccent,
-                    )
-                }
-                if (lane.isEmulatorLike) {
-                    MetaBadge(
-                        label = if (emulatorMatched) "ADB ${lane.emulatorPort} matched" else "ADB ${lane.emulatorPort ?: "missing"} missing",
-                        accent = if (emulatorMatched) LaneAccent else WarningAccent,
-                        tooltip = lane.emulatorPort?.let { emulatorPort ->
-                            if (emulatorMatched) {
-                                "Queue lane `$emulatorPort` has a connected ADB emulator on the same port."
-                            } else {
-                                "Queue lane `$emulatorPort` is configured, but `adb devices -l` does not currently show a connected emulator on that port."
-                            }
-                        },
-                    )
-                }
-            }
-
-            if (lane.tasks.isEmpty()) {
-                Text(
-                    text = if (lane.configuredScope != null) "Idle configured lane." else "Idle lane.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
-                )
-            } else {
-                Row(
+                Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    runningTasks.forEach { task ->
-                        TaskChip(task = task, running = true)
-                    }
-                    if (runningTasks.isNotEmpty() && waitingTasks.isNotEmpty()) {
-                        Text(
-                            text = "queue",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
-                        )
-                    }
-                    waitingTasks.forEach { task ->
-                        TaskChip(task = task, running = false)
-                    }
+                    QueueActivityPane(snapshot)
+                    LegendFooter()
+                }
+                Column(
+                    modifier = Modifier
+                        .width(400.dp)
+                        .fillMaxHeight()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    AgentsPanel(snapshot)
+                    EmulatorsPanel(snapshot)
+                    ServersPanel(snapshot)
                 }
             }
         }
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TaskChip(
-    task: QueueTask,
-    running: Boolean,
-) {
-    val accent = if (running) RunningAccent else WaitingAccent
-    val background = if (running) accent.copy(alpha = 0.12f) else accent.copy(alpha = 0.05f)
-    val identityLabel = task.displayIdentityLabel
-    val diagnosticLabel = identityLabel ?: buildString {
-        task.pid?.let { append("server $it") }
-        task.childPid?.let {
-            if (isNotEmpty()) append(" · ")
-            append("child $it")
-        }
-    }.takeIf { it.isNotBlank() }
-
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = background,
-        tonalElevation = 0.dp,
-    ) {
-        Column(
-            modifier = Modifier
-                .widthIn(min = 220.dp, max = 300.dp)
-                .border(1.dp, accent.copy(alpha = 0.34f), RoundedCornerShape(14.dp))
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(3.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    StatusBadge(if (running) "run" else "wait", accent)
-                    Text("#${task.id}", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
-                }
+private fun DashboardTopBar(snapshot: QueueSnapshot, onRefresh: () -> Unit) {
+    TopAppBar(
+        title = {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Agent Task Queue", fontWeight = FontWeight.SemiBold)
                 Text(
-                    task.statusAge(),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                )
-            }
-
-            Text(
-                text = task.displayCommand,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Medium,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-
-            diagnosticLabel?.let {
-                Text(
-                    text = it,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                    text = snapshot.dataDir.toString(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+        },
+        actions = {
+            Text(
+                text = "Updated ${formatRefreshTime(snapshot.refreshedAt)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary,
+            )
+            Spacer(Modifier.width(12.dp))
+            Button(onClick = onRefresh) { Text("Refresh") }
+            Spacer(Modifier.width(16.dp))
+        },
+    )
+}
+
+// ---------- Hero strip ----------
+
+@Composable
+private fun HeroStatStrip(snapshot: QueueSnapshot) {
+    val running = snapshot.summary.running
+    val waiting = snapshot.summary.waiting
+    val activeAgents = snapshot.runningTasks
+        .mapNotNull { it.displayAgentLabel }
+        .distinct()
+        .size
+    val configuredEmu = snapshot.emulatorAlignment.configuredQueues.size
+    val matchedEmu = snapshot.emulatorAlignment.matchedPorts.size
+    val connectedEmu = snapshot.adb.connectedEmulators
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        StatTile(
+            modifier = Modifier.weight(1f),
+            label = "RUNNING",
+            value = running.toString(),
+            caption = if (running == 0) "Nothing active" else if (running == 1) "Active task" else "Active tasks",
+            accent = if (running > 0) AccentRunning else AccentIdle,
+        )
+        StatTile(
+            modifier = Modifier.weight(1f),
+            label = "WAITING",
+            value = waiting.toString(),
+            caption = when {
+                waiting == 0 -> "Queue clear"
+                waiting >= 5 -> "Queue backed up"
+                waiting == 1 -> "Queued task"
+                else -> "Queued tasks"
+            },
+            accent = when {
+                waiting >= 5 -> AccentDanger
+                waiting > 0 -> AccentWarning
+                else -> AccentIdle
+            },
+        )
+        StatTile(
+            modifier = Modifier.weight(1f),
+            label = "AGENTS",
+            value = activeAgents.toString(),
+            caption = if (activeAgents == 0) "No agents running" else "With running tasks",
+            accent = if (activeAgents > 0) AccentSuccess else AccentIdle,
+        )
+        StatTile(
+            modifier = Modifier.weight(1f),
+            label = "EMULATORS",
+            value = if (configuredEmu == 0) connectedEmu.toString() else "$matchedEmu/$configuredEmu",
+            caption = when {
+                configuredEmu == 0 && connectedEmu == 0 -> "None connected"
+                configuredEmu == 0 -> "Connected, no lanes"
+                matchedEmu < configuredEmu -> "Lane missing device"
+                else -> "Lanes matched"
+            },
+            accent = when {
+                configuredEmu > 0 && matchedEmu < configuredEmu -> AccentDanger
+                configuredEmu == 0 && connectedEmu == 0 -> AccentIdle
+                else -> AccentSuccess
+            },
+        )
+    }
+}
+
+@Composable
+private fun StatTile(
+    modifier: Modifier,
+    label: String,
+    value: String,
+    caption: String,
+    accent: Color,
+) {
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = SurfaceElevated),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(IntrinsicSize.Min)
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(4.dp)
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(accent),
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = accent,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 1.2.sp,
+                )
+                Text(
+                    text = value,
+                    style = MaterialTheme.typography.headlineLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary,
+                )
+                Text(
+                    text = caption,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary,
+                )
+            }
+        }
+    }
+}
+
+// ---------- Queue activity pane ----------
+
+@Composable
+private fun QueueActivityPane(snapshot: QueueSnapshot) {
+    if (snapshot.scopeGroups.isEmpty()) {
+        EmptyState(
+            title = "No queue activity",
+            message = snapshot.statusMessage ?: "No queues are visible yet.",
+        )
+        return
+    }
+
+    val sortedScopes = snapshot.scopeGroups.sortedWith(
+        compareByDescending<ScopeGroup> { it.waitingCount > 0 }
+            .thenByDescending { scopePressure(it, snapshot) }
+            .thenByDescending { it.runningCount }
+            .thenBy { it.scopeName }
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        sortedScopes.forEach { scope ->
+            ScopeCard(scope = scope, snapshot = snapshot)
+        }
+    }
+}
+
+private fun scopePressure(scope: ScopeGroup, snapshot: QueueSnapshot): Double {
+    val usage = snapshot.configuredScopeUsage.firstOrNull { it.scopeName == scope.scopeName }
+    val cap = usage?.capacity
+    if (cap == null || cap == 0) {
+        return if (scope.runningCount == 0) 0.0 else 1.0
+    }
+    return scope.runningCount.toDouble() / cap
+}
+
+@Composable
+private fun ScopeCard(scope: ScopeGroup, snapshot: QueueSnapshot) {
+    val usage = snapshot.configuredScopeUsage.firstOrNull { it.scopeName == scope.scopeName }
+    val capacity = usage?.capacity
+    val used = usage?.usedSlots ?: scope.runningCount
+    val hasBackup = scope.waitingCount > 0
+    val capFull = capacity != null && used >= capacity && capacity > 0
+
+    val accent = when {
+        hasBackup && capFull -> AccentDanger
+        hasBackup -> AccentWarning
+        capFull -> AccentWarning
+        used > 0 -> AccentRunning
+        else -> AccentIdle
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = SurfaceCard),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(IntrinsicSize.Min),
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(5.dp)
+                    .fillMaxHeight()
+                    .background(accent),
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                ScopeHeader(
+                    scope = scope,
+                    usage = usage,
+                    accent = accent,
+                    hasBackup = hasBackup,
+                    capFull = capFull,
+                )
+                val sortedLanes = scope.lanes.sortedWith(
+                    compareByDescending<QueueLane> { it.waitingCount > 0 }
+                        .thenByDescending { it.runningCount > 0 }
+                        .thenByDescending { it.configuredScope != null }
+                        .thenBy { it.queueName }
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    sortedLanes.forEach { lane ->
+                        val matched = lane.emulatorPort != null &&
+                            lane.emulatorPort in snapshot.emulatorAlignment.matchedPorts
+                        LaneRow(lane = lane, emulatorMatched = matched)
+                    }
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun EnvironmentDetailsSection(snapshot: QueueSnapshot) {
-    SectionCard(
-        title = "Environment Details",
-        subtitle = "Secondary diagnostics for live server config and connected ADB devices.",
+private fun ScopeHeader(
+    scope: ScopeGroup,
+    usage: ConfiguredScopeUsage?,
+    accent: Color,
+    hasBackup: Boolean,
+    capFull: Boolean,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.Top,
     ) {
-        snapshot.statusMessage?.let { InfoBanner(it) }
-        snapshot.configuration.statusMessage?.let { InfoBanner(it) }
-        snapshot.adb.statusMessage?.let { InfoBanner(it) }
-
-        Text(
-            text = "Live queue servers",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-        )
-        if (snapshot.configuration.serverProcesses.isEmpty()) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = scope.scopeName,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                if (hasBackup) {
+                    PressureChip("BACKUP", AccentDanger)
+                }
+                if (capFull && !hasBackup) {
+                    PressureChip("AT CAPACITY", AccentWarning)
+                }
+            }
             Text(
-                text = "No matching task queue server processes detected for this data dir.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                text = "${scope.lanes.size} lane${if (scope.lanes.size == 1) "" else "s"} · " +
+                    "${scope.runningCount} running · ${scope.waitingCount} waiting",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary,
             )
-        } else {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                snapshot.configuration.serverProcesses.forEach { process ->
-                    val identity = snapshot.serverIdentityByPid[process.pid]
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.surface,
+        }
+        CapacityMeter(
+            capacity = usage?.capacity,
+            used = usage?.usedSlots ?: scope.runningCount,
+            accent = accent,
+            configured = usage != null,
+        )
+    }
+}
+
+@Composable
+private fun CapacityMeter(
+    capacity: Int?,
+    used: Int,
+    accent: Color,
+    configured: Boolean,
+) {
+    Column(
+        horizontalAlignment = Alignment.End,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        if (capacity == null) {
+            Text(
+                text = if (configured) "cap conflict" else "default per-lane",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextMuted,
+            )
+            return
+        }
+        Text(
+            text = "$used / $capacity slots",
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = accent,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+            repeat(capacity) { i ->
+                Box(
+                    modifier = Modifier
+                        .size(width = 18.dp, height = 10.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(if (i < used) accent else accent.copy(alpha = 0.15f))
+                        .border(1.dp, accent.copy(alpha = 0.35f), RoundedCornerShape(3.dp)),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LaneRow(lane: QueueLane, emulatorMatched: Boolean) {
+    val leaf = lane.queueName.substringAfterLast('/')
+    val showFullPath = leaf != lane.queueName
+    val cap = lane.exactCapacity
+    val running = lane.tasks.filter { it.status.equals("running", ignoreCase = true) }
+    val waiting = lane.tasks.filter { it.status.equals("waiting", ignoreCase = true) }
+    val hasBackup = waiting.isNotEmpty()
+    val accent = when {
+        hasBackup -> AccentWarning
+        running.isNotEmpty() -> AccentRunning
+        else -> AccentIdle
+    }
+
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = SurfaceElevated,
+        tonalElevation = 0.dp,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(IntrinsicSize.Min)
+                .border(1.dp, accent.copy(alpha = 0.2f), RoundedCornerShape(14.dp)),
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .fillMaxHeight()
+                    .background(accent),
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(1.dp),
                     ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.14f), RoundedCornerShape(12.dp))
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             Text(
-                                text = identity?.displayLabel ?: process.agentLabel,
+                                text = leaf,
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.SemiBold,
                             )
-                            identity?.launchContextLabel
-                                ?.takeIf { identity.contextLabel == null }
-                                ?.let { launchContextLabel ->
-                                Text(
-                                    text = "server launched from $launchContextLabel",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.58f),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
+                            if (lane.isEmulatorLike) {
+                                EmulatorDot(
+                                    matched = emulatorMatched,
+                                    port = lane.emulatorPort,
                                 )
                             }
-                            Row(
-                                modifier = Modifier.horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                MetaBadge(label = "pid ${process.pid}", accent = ScopeAccent)
-                                MetaBadge(
-                                    label = if (process.queueCapacities.isEmpty()) {
-                                        "no scope overrides"
-                                    } else {
-                                        "${process.queueCapacities.size} scope override(s)"
-                                    },
-                                    accent = LaneAccent,
-                                    filled = process.queueCapacities.isNotEmpty(),
-                                )
-                                identity?.detailLabel?.let { detailLabel ->
-                                    MetaBadge(label = detailLabel, accent = WaitingAccent)
-                                }
+                            if (lane.hasCapacityConflict) {
+                                PressureChip("CAP CONFLICT", AccentDanger)
                             }
+                        }
+                        if (showFullPath) {
                             Text(
-                                text = process.commandLine,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                                text = lane.queueName,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextMuted,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
                     }
+                    LaneCountBadge(running = running.size, waiting = waiting.size, cap = cap)
                 }
-            }
-        }
 
-        Text(
-            text = "ADB devices",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-        )
-        if (snapshot.adb.devices.isEmpty()) {
-            Text(
-                text = "No ADB devices detected.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-            )
-        } else {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                snapshot.adb.devices.forEach { device ->
-                    AdbDeviceRow(device)
-                }
+                LaneTimeline(cap = cap, running = running, waiting = waiting)
             }
         }
     }
 }
 
 @Composable
-private fun SummaryRow(snapshot: QueueSnapshot) {
+private fun LaneCountBadge(running: Int, waiting: Int, cap: Int) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        SummaryCard(
-            title = "Running",
-            value = snapshot.summary.running.toString(),
-            caption = "Active commands",
-            accent = Color(0xFFD06A3A),
-            modifier = Modifier.weight(1f),
-        )
-        SummaryCard(
-            title = "Waiting",
-            value = snapshot.summary.waiting.toString(),
-            caption = "Queued tasks",
-            accent = Color(0xFF3D7EA6),
-            modifier = Modifier.weight(1f),
-        )
-        SummaryCard(
-            title = "Visible Queues",
-            value = snapshot.queueLanes.size.toString(),
-            caption = "Observed + configured queue names",
-            accent = Color(0xFF5B8A67),
-            modifier = Modifier.weight(1f),
-        )
-        SummaryCard(
-            title = "Emulators",
-            value = "${snapshot.configuration.configuredEmulatorScopeCount} / ${snapshot.adb.connectedEmulators}",
-            caption = "Configured emulator queues / connected emulators",
-            accent = Color(0xFF8B5F8C),
-            modifier = Modifier.weight(1f),
-        )
+        if (running > 0) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Box(
+                    Modifier
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(AccentRunning),
+                )
+                Text(
+                    text = "$running/$cap",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
+        if (waiting > 0) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Box(
+                    Modifier
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(AccentWarning),
+                )
+                Text(
+                    text = "+$waiting",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
+        if (running == 0 && waiting == 0) {
+            Text(
+                text = "idle",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextMuted,
+            )
+        }
     }
 }
 
 @Composable
-private fun CapacityOverview(configuredScopes: List<ConfiguredScopeUsage>) {
-    SectionCard(
-        title = "Capacity Map",
-        subtitle = "Configured scopes stay visible even when empty, so you can see where parallel slots actually exist.",
+private fun LaneTimeline(cap: Int, running: List<QueueTask>, waiting: List<QueueTask>) {
+    if (running.isEmpty() && waiting.isEmpty()) {
+        Text(
+            text = "Lane idle",
+            style = MaterialTheme.typography.bodySmall,
+            color = TextMuted,
+            fontStyle = FontStyle.Italic,
+        )
+        return
+    }
+    val slotCount = max(cap, running.size).coerceAtLeast(1)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (configuredScopes.isEmpty()) {
-            Text(
-                "No live --queue-capacity scopes detected. Exact queues still default to capacity 1.",
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-            )
-            return@SectionCard
+        repeat(slotCount) { i ->
+            val task = running.getOrNull(i)
+            if (task != null) {
+                TaskPill(task = task, running = true)
+            } else {
+                EmptySlotPill()
+            }
         }
+        if (waiting.isNotEmpty()) {
+            Box(
+                modifier = Modifier
+                    .width(1.dp)
+                    .height(44.dp)
+                    .background(DividerColor),
+            )
+            waiting.forEach { task ->
+                TaskPill(task = task, running = false)
+            }
+        }
+    }
+}
 
+@Composable
+private fun EmptySlotPill() {
+    Box(
+        modifier = Modifier
+            .size(width = 200.dp, height = 62.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color(0xFFF2ECE0))
+            .border(1.dp, DividerColor, RoundedCornerShape(10.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "open slot",
+            style = MaterialTheme.typography.labelSmall,
+            color = TextMuted,
+            fontStyle = FontStyle.Italic,
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun TaskPill(task: QueueTask, running: Boolean) {
+    val accent = agentColor(task.displayAgentLabel)
+    val bg = if (running) accent.copy(alpha = 0.14f) else accent.copy(alpha = 0.06f)
+    val border = if (running) accent.copy(alpha = 0.55f) else accent.copy(alpha = 0.3f)
+
+    TooltipArea(
+        tooltip = { TooltipBubble(buildTaskTooltip(task)) },
+        delayMillis = 200,
+    ) {
+        Column(
+            modifier = Modifier
+                .widthIn(min = 200.dp, max = 260.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(bg)
+                .border(1.dp, border, RoundedCornerShape(10.dp))
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Box(
+                    Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(accent),
+                )
+                Text(
+                    text = task.displayAgentLabel ?: "unknown agent",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = accent,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = "#${task.id}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary,
+                )
+            }
+            Text(
+                text = task.displayCommand,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = if (running) FontWeight.Medium else FontWeight.Normal,
+                color = TextPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                task.displayContextLabel?.let {
+                    Text(
+                        text = it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = task.statusAge(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextMuted,
+                )
+            }
+        }
+    }
+}
+
+private fun buildTaskTooltip(task: QueueTask): String = buildString {
+    append("#${task.id}  ")
+    append(task.status.uppercase())
+    append('\n')
+    append(task.displayCommand)
+    task.displayIdentityLabel?.let {
+        append("\n\n")
+        append(it)
+    }
+    append("\n\nQueue: ")
+    append(task.queueName)
+    append('\n')
+    append(task.statusAge())
+    val pidParts = buildList {
+        task.pid?.let { add("server pid $it") }
+        task.childPid?.let { add("child pid $it") }
+    }
+    if (pidParts.isNotEmpty()) {
+        append('\n')
+        append(pidParts.joinToString(" · "))
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun EmulatorDot(matched: Boolean, port: String?) {
+    val color = if (matched) AccentSuccess else AccentDanger
+    val tooltip = if (matched) {
+        "Queue lane maps to ADB emulator on port ${port ?: "?"}."
+    } else {
+        "Lane expects emulator on port ${port ?: "?"}, but `adb devices -l` does not show one."
+    }
+    TooltipArea(
+        tooltip = { TooltipBubble(tooltip) },
+        delayMillis = 200,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier
+                .clip(RoundedCornerShape(999.dp))
+                .background(color.copy(alpha = 0.12f))
+                .padding(horizontal = 6.dp, vertical = 2.dp),
+        ) {
+            Box(
+                Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(color),
+            )
+            Text(
+                text = if (matched) "ADB :${port ?: "?"}" else "ADB missing",
+                style = MaterialTheme.typography.labelSmall,
+                color = color,
+                fontWeight = FontWeight.Medium,
+            )
+        }
+    }
+}
+
+@Composable
+private fun PressureChip(text: String, accent: Color) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(accent.copy(alpha = 0.15f))
+            .border(1.dp, accent.copy(alpha = 0.55f), RoundedCornerShape(999.dp))
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+    ) {
+        Text(
+            text = text,
+            color = accent,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.8.sp,
+        )
+    }
+}
+
+// ---------- Environment pane: agents ----------
+
+private data class AgentContextSummary(
+    val context: String,
+    val runningCount: Int,
+    val waitingCount: Int,
+)
+
+private data class AgentSummary(
+    val agentLabel: String,
+    val contexts: List<AgentContextSummary>,
+    val runningTotal: Int,
+    val waitingTotal: Int,
+)
+
+private fun buildAgentSummaries(snapshot: QueueSnapshot): List<AgentSummary> {
+    return snapshot.tasks
+        .groupBy { it.displayAgentLabel ?: "Unknown agent" }
+        .map { (agentLabel, tasks) ->
+            val contexts = tasks
+                .groupBy { it.displayContextLabel ?: "no context" }
+                .map { (ctx, ctxTasks) ->
+                    AgentContextSummary(
+                        context = ctx,
+                        runningCount = ctxTasks.count { it.status.equals("running", ignoreCase = true) },
+                        waitingCount = ctxTasks.count { it.status.equals("waiting", ignoreCase = true) },
+                    )
+                }
+                .sortedWith(
+                    compareByDescending<AgentContextSummary> { it.runningCount }
+                        .thenByDescending { it.waitingCount }
+                        .thenBy { it.context }
+                )
+            AgentSummary(
+                agentLabel = agentLabel,
+                contexts = contexts,
+                runningTotal = tasks.count { it.status.equals("running", ignoreCase = true) },
+                waitingTotal = tasks.count { it.status.equals("waiting", ignoreCase = true) },
+            )
+        }
+        .sortedWith(
+            compareByDescending<AgentSummary> { it.runningTotal }
+                .thenByDescending { it.waitingTotal }
+                .thenBy { it.agentLabel }
+        )
+}
+
+@Composable
+private fun AgentsPanel(snapshot: QueueSnapshot) {
+    val summaries = buildAgentSummaries(snapshot)
+    PaneSection(
+        title = "Agents",
+        subtitle = when {
+            summaries.isEmpty() -> "No agent activity"
+            summaries.size == 1 -> "1 agent with live tasks"
+            else -> "${summaries.size} agents with live tasks"
+        },
+    ) {
+        if (summaries.isEmpty()) {
+            Text(
+                text = "No running or queued tasks.",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextMuted,
+            )
+            return@PaneSection
+        }
+        summaries.forEach { AgentCard(it) }
+    }
+}
+
+@Composable
+private fun AgentCard(summary: AgentSummary) {
+    val accent = agentColor(summary.agentLabel)
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = SurfaceElevated,
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                .height(IntrinsicSize.Min)
+                .border(1.dp, accent.copy(alpha = 0.22f), RoundedCornerShape(12.dp)),
         ) {
-            configuredScopes.forEach { usage ->
-                Card(
-                    modifier = Modifier.widthIn(min = 260.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF9F3EA)),
+            Box(
+                modifier = Modifier
+                    .width(4.dp)
+                    .fillMaxHeight()
+                    .background(accent),
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(accent),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = summary.agentLabel,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = accent,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    AgentCountBadges(
+                        running = summary.runningTotal,
+                        waiting = summary.waitingTotal,
+                    )
+                }
+                if (summary.contexts.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        summary.contexts.forEach { ctx ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Box(
+                                    Modifier
+                                        .size(5.dp)
+                                        .clip(CircleShape)
+                                        .background(accent.copy(alpha = 0.45f)),
+                                )
+                                Text(
+                                    text = ctx.context,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                if (ctx.runningCount > 0) {
+                                    Text(
+                                        text = "${ctx.runningCount} run",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = AccentRunning,
+                                        fontWeight = FontWeight.Medium,
+                                    )
+                                }
+                                if (ctx.waitingCount > 0) {
+                                    Text(
+                                        text = "${ctx.waitingCount} wait",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = AccentWarning,
+                                        fontWeight = FontWeight.Medium,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AgentCountBadges(running: Int, waiting: Int) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        CountBubble(label = running.toString(), accent = AccentRunning, caption = "run")
+        CountBubble(label = waiting.toString(), accent = AccentWarning, caption = "wait")
+    }
+}
+
+@Composable
+private fun CountBubble(label: String, accent: Color, caption: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(accent.copy(alpha = 0.12f))
+            .padding(horizontal = 7.dp, vertical = 2.dp),
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = accent,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = caption,
+            style = MaterialTheme.typography.labelSmall,
+            color = accent.copy(alpha = 0.75f),
+        )
+    }
+}
+
+// ---------- Environment pane: emulators ----------
+
+@Composable
+private fun EmulatorsPanel(snapshot: QueueSnapshot) {
+    val alignment = snapshot.emulatorAlignment
+    val matchedPorts = alignment.matchedPorts
+    val configured = alignment.configuredQueues
+    val connected = snapshot.adb.devices.filter { it.isConnected && it.isEmulator }
+    val devicesByPort = connected.associateBy { it.emulatorPort }
+    val extraDevices = connected.filter { it.emulatorPort == null || it.emulatorPort !in matchedPorts }
+
+    PaneSection(
+        title = "Emulators",
+        subtitle = when {
+            configured.isEmpty() && connected.isEmpty() -> "No configured lanes · no emulators"
+            configured.isEmpty() -> "${connected.size} emulator(s) connected · no lanes configured"
+            else -> "${matchedPorts.size}/${configured.size} lanes matched to devices"
+        },
+    ) {
+        if (configured.isEmpty() && connected.isEmpty()) {
+            Text(
+                text = "Nothing to show. Start an emulator or configure an emulator queue lane.",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextMuted,
+            )
+            return@PaneSection
+        }
+
+        val sortedConfigured = configured.sortedWith(
+            compareByDescending<QueueLane> { it.emulatorPort != null && it.emulatorPort !in matchedPorts }
+                .thenByDescending { it.runningCount }
+                .thenBy { it.queueName }
+        )
+        sortedConfigured.forEach { lane ->
+            val port = lane.emulatorPort
+            val device = port?.let { devicesByPort[it] }
+            val matched = port != null && port in matchedPorts
+            EmulatorPairRow(lane = lane, device = device, matched = matched)
+        }
+        if (extraDevices.isNotEmpty()) {
+            Text(
+                text = "Unbound emulators",
+                style = MaterialTheme.typography.labelMedium,
+                color = TextSecondary,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            extraDevices.forEach { device ->
+                EmulatorPairRow(lane = null, device = device, matched = false)
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmulatorPairRow(lane: QueueLane?, device: AdbDevice?, matched: Boolean) {
+    val accent = when {
+        matched -> AccentSuccess
+        lane != null -> AccentDanger
+        else -> AccentWarning
+    }
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = SurfaceElevated,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, accent.copy(alpha = 0.28f), RoundedCornerShape(10.dp))
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(1.dp),
+            ) {
+                if (lane != null) {
+                    Text(
+                        text = lane.queueName.substringAfterLast('/'),
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = "lane · ${lane.runningCount}/${lane.exactCapacity} run · ${lane.waitingCount} wait",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextMuted,
+                        maxLines = 1,
+                    )
+                } else {
+                    Text(
+                        text = "no configured lane",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = TextMuted,
+                        fontStyle = FontStyle.Italic,
+                    )
+                }
+            }
+            Text(
+                text = when {
+                    matched -> "↔"
+                    lane == null -> "→"
+                    else -> "✕"
+                },
+                color = accent,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(1.dp),
+            ) {
+                if (device != null) {
+                    Text(
+                        text = device.serial,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = device.detailLine.ifBlank { "state ${device.state}" },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                } else {
+                    Text(
+                        text = "no device on :${lane?.emulatorPort ?: "?"}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = AccentDanger,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = "start emulator or remove lane",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ---------- Environment pane: servers ----------
+
+@Composable
+private fun ServersPanel(snapshot: QueueSnapshot) {
+    val servers = snapshot.configuration.serverProcesses
+    PaneSection(
+        title = "Queue Servers",
+        subtitle = when {
+            servers.isEmpty() -> "No live servers for this data dir"
+            servers.size == 1 -> "1 task-queue server"
+            else -> "${servers.size} task-queue servers"
+        },
+    ) {
+        if (servers.isEmpty()) {
+            Text(
+                text = snapshot.configuration.statusMessage
+                    ?: "No matching task queue server processes.",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextMuted,
+            )
+            return@PaneSection
+        }
+        servers.forEach { proc ->
+            val identity = snapshot.serverIdentityByPid[proc.pid]
+            val accentSource = identity?.primaryLabel ?: proc.agentLabel
+            val accent = agentColor(accentSource)
+            Surface(shape = RoundedCornerShape(10.dp), color = SurfaceElevated) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, accent.copy(alpha = 0.2f), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        Text(usage.scopeName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            text = if (usage.capacity != null) {
-                                "${usage.runningCount} running · ${usage.waitingCount} waiting · ${usage.displayCapacityLabel} slot(s)"
-                            } else {
-                                "${usage.runningCount} running · ${usage.waitingCount} waiting · conflicting cap ${usage.displayCapacityLabel}"
-                            },
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                        SlotStrip(
-                            capacity = usage.capacity,
-                            usedSlots = usage.usedSlots,
-                            accent = Color(0xFFB35C33),
+                        Box(
+                            Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(accent),
                         )
                         Text(
-                            text = "${usage.descendantQueueCount} visible queue(s) in scope · from ${usage.sourceServerLabels.joinToString()}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+                            text = identity?.displayLabel ?: proc.agentLabel,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            text = "pid ${proc.pid}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextMuted,
+                        )
+                    }
+                    identity?.detailLabel?.let {
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary,
+                        )
+                    }
+                    if (proc.queueCapacities.isNotEmpty()) {
+                        Text(
+                            text = proc.queueCapacities.entries.joinToString(" · ") { "${it.key}=${it.value}" },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextMuted,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -667,387 +1317,113 @@ private fun CapacityOverview(configuredScopes: List<ConfiguredScopeUsage>) {
     }
 }
 
-@Composable
-private fun SummaryCard(
-    title: String,
-    value: String,
-    caption: String,
-    accent: Color,
-    modifier: Modifier = Modifier,
-) {
-    Card(
-        modifier = modifier,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(999.dp))
-                    .background(accent.copy(alpha = 0.16f))
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
-            ) {
-                Text(title, color = accent, style = MaterialTheme.typography.labelLarge)
-            }
-            Text(value, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-            Text(
-                caption,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-            )
-        }
-    }
-}
+// ---------- Shared pane/utility composables ----------
 
 @Composable
-private fun ScopeOverview(scopeGroups: List<ScopeGroup>) {
-    if (scopeGroups.isEmpty()) {
-        return
-    }
-
-    SectionCard(title = "Scope Activity", subtitle = "Each card rolls up descendant exact queues under a shared root scope.") {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            scopeGroups.forEach { scope ->
-                Card(
-                    modifier = Modifier.widthIn(min = 220.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF7F0E4)),
-                ) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text(scope.scopeName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            text = "${scope.runningCount} running · ${scope.waitingCount} waiting",
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                        Text(
-                            text = "${scope.lanes.size} exact queues · ${scope.taskCount} total tasks",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
-                        )
-                        val configuredLanes = scope.lanes.count { it.configuredScope != null }
-                        if (configuredLanes > 0) {
-                            Text(
-                                text = "$configuredLanes configured lane(s) visible even when idle",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TaskSection(
+private fun PaneSection(
     title: String,
     subtitle: String,
-    tasks: List<QueueTask>,
-    emptyLabel: String,
+    content: @Composable ColumnScope.() -> Unit,
 ) {
-    SectionCard(title = title, subtitle = subtitle) {
-        if (tasks.isEmpty()) {
-            Text(emptyLabel, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
-            return@SectionCard
-        }
-
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            tasks.forEach { task ->
-                TaskRow(task = task, showQueue = true)
-            }
-        }
-    }
-}
-
-@Composable
-private fun ScopeDetails(scopeGroups: List<ScopeGroup>) {
-    SectionCard(
-        title = "Queues By Scope",
-        subtitle = "Exact queues stay FIFO; grouping them here makes hierarchical queue families easier to scan.",
-    ) {
-        if (scopeGroups.isEmpty()) {
-            Text("No active queues.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
-            return@SectionCard
-        }
-
-        Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
-            scopeGroups.forEach { scope ->
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(scope.scopeName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    scope.lanes.forEach { lane ->
-                        QueueLaneCard(lane)
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun QueueLaneCard(lane: QueueLane) {
-    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFFFFBF5))) {
-        Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(lane.queueName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        text = "${lane.runningCount} running · ${lane.waitingCount} waiting · ${lane.tasks.size} task(s)",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                    )
-                    Text(
-                        text = when {
-                            lane.hasCapacityConflict -> "Exact cap conflict: ${lane.configuredScope?.displayCapacityLabel}"
-                            lane.configuredCapacity != null -> "Exact cap ${lane.configuredCapacity} configured"
-                            else -> "Exact cap 1 default"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
-                    )
-                    if (lane.configuredCapacity != null || lane.hasCapacityConflict) {
-                        SlotStrip(
-                            capacity = lane.configuredCapacity,
-                            usedSlots = lane.runningCount,
-                            accent = Color(0xFF46705C),
-                        )
-                    }
-                }
-            }
-
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (lane.tasks.isEmpty()) {
-                    Text(
-                        text = "No live tasks in this queue right now.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                    )
-                } else {
-                    lane.tasks.forEach { task ->
-                        TaskRow(task = task, showQueue = false)
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TaskRow(task: QueueTask, showQueue: Boolean) {
-    val accent = if (task.status.equals("running", ignoreCase = true)) {
-        Color(0xFFD06A3A)
-    } else {
-        Color(0xFF3D7EA6)
-    }
-
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp,
+    Card(
+        colors = CardDefaults.cardColors(containerColor = SurfaceCard),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
     ) {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .border(1.dp, accent.copy(alpha = 0.18f), RoundedCornerShape(18.dp))
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    StatusBadge(task.status, accent)
-                    Text("#${task.id}", fontWeight = FontWeight.Medium)
-                    if (showQueue) {
-                        Text(
-                            task.queueName,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                        )
-                    }
+            modifier = Modifier.fillMaxWidth().padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            content = {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary,
+                    )
                 }
-                Text(
-                    task.statusAge(),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                )
-            }
-
-            Text(
-                text = task.displayCommand,
-                style = MaterialTheme.typography.bodyLarge,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-
-            val processLine = buildString {
-                task.displayIdentityLabel?.let { append(it) }
-                task.pid?.takeIf { task.displayIdentityLabel == null }?.let { append("server pid $it") }
-                task.childPid?.let {
-                    if (isNotEmpty()) append(" · ")
-                    append("child pid $it")
-                }
-            }
-            if (processLine.isNotEmpty()) {
-                Text(
-                    processLine,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun AdbSection(snapshot: QueueSnapshot) {
-    SectionCard(
-        title = "ADB Devices",
-        subtitle = "Compare connected emulators with queue scopes so emulator fan-out stays aligned with real devices.",
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            SummaryCard(
-                title = "Connected",
-                value = snapshot.adb.connectedDevices.toString(),
-                caption = "ADB devices in state=device",
-                accent = Color(0xFF305B78),
-                modifier = Modifier.weight(1f),
-            )
-            SummaryCard(
-                title = "Emulators",
-                value = snapshot.adb.connectedEmulators.toString(),
-                caption = "Connected emulator serials",
-                accent = Color(0xFFB35C33),
-                modifier = Modifier.weight(1f),
-            )
-            SummaryCard(
-                title = "Configured",
-                value = snapshot.emulatorAlignment.configuredQueues.size.toString(),
-                caption = "Configured emulator queues",
-                accent = Color(0xFF46705C),
-                modifier = Modifier.weight(1f),
-            )
-            SummaryCard(
-                title = "Matched",
-                value = snapshot.emulatorAlignment.matchedPorts.size.toString(),
-                caption = "Queue/device port matches",
-                accent = Color(0xFF8B5F8C),
-                modifier = Modifier.weight(1f),
-            )
-        }
-
-        val alignment = snapshot.emulatorAlignment
-        if (alignment.unmatchedConfiguredQueues.isNotEmpty() || alignment.unmatchedDevices.isNotEmpty()) {
-            Text(
-                text = buildString {
-                    if (alignment.unmatchedConfiguredQueues.isNotEmpty()) {
-                        append("Unmatched configured queues: ")
-                        append(alignment.unmatchedConfiguredQueues.joinToString { it.queueName })
-                    }
-                    if (alignment.unmatchedDevices.isNotEmpty()) {
-                        if (isNotEmpty()) append(". ")
-                        append("Unmatched ADB devices: ")
-                        append(alignment.unmatchedDevices.joinToString { it.serial })
-                    }
-                },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
-            )
-        }
-
-        if (snapshot.adb.devices.isEmpty()) {
-            Text(
-                text = "No ADB devices to display.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-            )
-            return@SectionCard
-        }
-
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            snapshot.adb.devices.forEach { device ->
-                AdbDeviceRow(device)
-            }
-        }
-    }
-}
-
-@Composable
-private fun StatusBadge(text: String, accent: Color) {
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(999.dp))
-            .background(accent.copy(alpha = 0.16f))
-            .padding(horizontal = 8.dp, vertical = 3.dp),
-    ) {
-        Text(
-            text = text.uppercase(),
-            color = accent,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.SemiBold,
+                content()
+            },
         )
     }
 }
 
 @Composable
-@OptIn(ExperimentalFoundationApi::class)
-private fun MetaBadge(
-    label: String,
-    accent: Color,
-    filled: Boolean = false,
-    tooltip: String? = null,
-) {
-    val background = if (filled) accent.copy(alpha = 0.14f) else Color.Transparent
-    val badgeContent: @Composable () -> Unit = {
-        Surface(
-            shape = RoundedCornerShape(999.dp),
-            color = background,
+private fun BannerStack(snapshot: QueueSnapshot) {
+    val errors = listOfNotNull(
+        snapshot.errorMessage,
+        snapshot.configuration.errorMessage,
+        snapshot.adb.errorMessage,
+    )
+    if (errors.isEmpty()) return
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        errors.forEach { ErrorBanner(it) }
+    }
+}
+
+@Composable
+private fun EmptyState(title: String, message: String) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = SurfaceCard),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                text = label,
-                modifier = Modifier
-                    .border(1.dp, accent.copy(alpha = 0.38f), RoundedCornerShape(999.dp))
-                    .padding(horizontal = 9.dp, vertical = 4.dp),
-                color = accent,
-                style = MaterialTheme.typography.labelSmall,
+                text = title,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = TextSecondary,
+            )
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextMuted,
+                textAlign = TextAlign.Center,
             )
         }
     }
+}
 
-    if (tooltip != null) {
-        TooltipArea(
-            tooltip = {
-                TooltipBubble(tooltip)
-            },
-            delayMillis = 150,
-        ) {
-            badgeContent()
-        }
-    } else {
-        badgeContent()
+@Composable
+private fun LegendFooter() {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        LegendDot(color = AccentRunning, label = "running")
+        LegendDot(color = AccentWarning, label = "waiting / backup")
+        LegendDot(color = AccentDanger, label = "backup + full")
+        LegendDot(color = AccentSuccess, label = "emulator matched")
+        LegendDot(color = AccentIdle, label = "idle")
+    }
+}
+
+@Composable
+private fun LegendDot(color: Color, label: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Box(
+            Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(color),
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = TextMuted,
+        )
     }
 }
 
@@ -1061,7 +1437,7 @@ private fun TooltipBubble(text: String) {
         Text(
             text = text,
             modifier = Modifier
-                .widthIn(max = 280.dp)
+                .widthIn(max = 320.dp)
                 .padding(horizontal = 10.dp, vertical = 8.dp),
             color = Color.White,
             style = MaterialTheme.typography.bodySmall,
@@ -1070,138 +1446,18 @@ private fun TooltipBubble(text: String) {
 }
 
 @Composable
-private fun SlotStrip(
-    capacity: Int?,
-    usedSlots: Int,
-    accent: Color,
-    fallbackLabel: String? = null,
-) {
-    if (capacity == null) {
-        fallbackLabel?.let {
-            Text(
-                text = it,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-            )
-        }
-        return
-    }
-
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-        repeat(capacity) { index ->
-            val filled = index < usedSlots
-            Box(
-                modifier = Modifier
-                    .size(width = 16.dp, height = 9.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(if (filled) accent else accent.copy(alpha = 0.12f))
-                    .border(1.dp, accent.copy(alpha = 0.4f), RoundedCornerShape(4.dp)),
-            )
-        }
-        Text(
-            text = "$usedSlots/$capacity used",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-        )
-    }
-}
-
-private fun scopeLabel(usage: ConfiguredScopeUsage): String = usage.scopeName.substringAfterLast('/')
-
-@Composable
-private fun AdbDeviceRow(device: AdbDevice) {
-    val accent = when {
-        device.isConnected && device.isEmulator -> Color(0xFF46705C)
-        device.isConnected -> Color(0xFF305B78)
-        else -> Color(0xFFB35C33)
-    }
-
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp,
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .border(1.dp, accent.copy(alpha = 0.18f), RoundedCornerShape(14.dp))
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    StatusBadge(device.state, accent)
-                    Text(device.serial, fontWeight = FontWeight.Medium)
-                }
-                if (device.emulatorPort != null) {
-                    Text(
-                        text = "port ${device.emulatorPort}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                    )
-                }
-            }
-            if (device.detailLine.isNotBlank()) {
-                Text(
-                    text = device.detailLine,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun SectionCard(
-    title: String,
-    subtitle: String,
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            content = {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        subtitle,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                    )
-                }
-                content()
-            },
-        )
-    }
-}
-
-@Composable
 private fun ErrorBanner(message: String) {
-    Banner(message = message, background = Color(0xFFFBE4E3), foreground = MaterialTheme.colorScheme.error)
-}
-
-@Composable
-private fun InfoBanner(message: String) {
-    Banner(message = message, background = Color(0xFFEAF1F6), foreground = MaterialTheme.colorScheme.primary)
-}
-
-@Composable
-private fun Banner(message: String, background: Color, foreground: Color) {
-    Surface(shape = RoundedCornerShape(16.dp), color = background) {
+    Surface(shape = RoundedCornerShape(14.dp), color = Color(0xFFFBE4E3)) {
         Text(
             text = message,
             modifier = Modifier.fillMaxWidth().padding(14.dp),
-            color = foreground,
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodyMedium,
         )
     }
 }
+
+// ---------- CLI args ----------
 
 private fun resolveDataDir(args: Array<String>): Path {
     if (args.any { it == "-h" || it == "--help" }) {
