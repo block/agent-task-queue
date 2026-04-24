@@ -48,6 +48,11 @@ CLI_INSTANCE_ID = str(uuid.uuid4())[:8]
 AMP_CLI_LOG_PATH = Path.home() / ".cache" / "amp" / "logs" / "cli.log"
 AMP_THREAD_ID_PATTERN = re.compile(r"T-[0-9a-f-]{36}")
 AMP_ENV_ASSIGNMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+AMP_ENV_VALUE_PATTERN_TEMPLATE = r"(?:^|\s){name}=(.*?)(?=\s+[A-Za-z_][A-Za-z0-9_]*=|$)"
+AMP_PS_COMMAND_CANDIDATES = [
+    ["ps", "eww", "-axo", "pid=,command="],
+    ["ps", "eww", "axo", "pid=,command="],
+]
 AMP_GLOBAL_FLAGS_WITH_VALUE = {
     "--visibility",
     "--settings-file",
@@ -302,7 +307,8 @@ def cmd_logs(args):
 
 
 def _extract_env_value(process_line: str, env_name: str) -> str | None:
-    match = re.search(rf"(?:^|\s){re.escape(env_name)}=([^\s]+)", process_line)
+    pattern = AMP_ENV_VALUE_PATTERN_TEMPLATE.format(name=re.escape(env_name))
+    match = re.search(pattern, process_line)
     if not match:
         return None
     value = match.group(1).strip()
@@ -451,14 +457,24 @@ def parse_amp_thread_ids_from_log(
 
 def discover_amp_sessions(cli_log_path: Path = AMP_CLI_LOG_PATH) -> list[AmpSession]:
     """Discover live interactive Amp sessions and resolve their current thread IDs."""
-    result = subprocess.run(
-        ["ps", "eww", "-axo", "pid=,command="],
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    if result.returncode != 0:
-        raise RuntimeError("Failed to enumerate running processes with ps")
+    last_error = "Failed to enumerate running processes with ps"
+    result = None
+    for command in AMP_PS_COMMAND_CANDIDATES:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            break
+        stderr = result.stderr.strip()
+        stdout = result.stdout.strip()
+        details = stderr or stdout
+        if details:
+            last_error = details
+    else:
+        raise RuntimeError(last_error)
 
     sessions = parse_amp_sessions_from_ps_output(result.stdout)
     if not sessions or not cli_log_path.exists():

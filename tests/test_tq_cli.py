@@ -14,6 +14,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TypeVar
 
 import pytest
@@ -591,6 +592,15 @@ class TestTqHelp:
 
 
 class TestAmpRestart:
+    def test_extract_env_value_preserves_paths_with_spaces(self):
+        process_line = (
+            "86296 amp -m deep PWD=/Users/sedwards/Development/Repo With Spaces "
+            "AGENT_SESSION_ID=20260420_6 SHELL=/bin/zsh"
+        )
+
+        assert tq._extract_env_value(process_line, "PWD") == "/Users/sedwards/Development/Repo With Spaces"
+        assert tq._extract_env_value(process_line, "AGENT_SESSION_ID") == "20260420_6"
+
     def test_parse_amp_sessions_filters_to_interactive_invocations(self):
         ps_output = """
 86296 amp -m deep PWD=/Users/sedwards/Development/block-invert-config AGENT_SESSION_ID=20260420_6
@@ -609,6 +619,28 @@ class TestAmpRestart:
         assert sessions[0].cwd == "/Users/sedwards/Development/block-invert-config"
         assert sessions[0].agent_session_id == "20260420_6"
         assert sessions[1].cwd == "/Users/sedwards/Development/agent-task-queue"
+
+    def test_discover_amp_sessions_falls_back_to_linux_ps_flags(self, monkeypatch, tmp_path):
+        cli_log_path = tmp_path / "cli.log"
+        cli_log_path.write_text("")
+        calls = []
+
+        def fake_run(command, capture_output, text, timeout):
+            calls.append(command)
+            if command == tq.AMP_PS_COMMAND_CANDIDATES[0]:
+                return SimpleNamespace(returncode=1, stdout="", stderr="must set personality to get -x option")
+            return SimpleNamespace(
+                returncode=0,
+                stdout="86296 amp -m deep PWD=/tmp AGENT_SESSION_ID=20260420_6\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr(tq.subprocess, "run", fake_run)
+
+        sessions = tq.discover_amp_sessions(cli_log_path=cli_log_path)
+
+        assert [session.pid for session in sessions] == [86296]
+        assert calls == tq.AMP_PS_COMMAND_CANDIDATES[:2]
 
     def test_parse_amp_thread_ids_uses_latest_entry_per_pid(self):
         log_text = "\n".join(
