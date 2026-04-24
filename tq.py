@@ -15,12 +15,16 @@ import subprocess
 import sys
 import time
 import uuid
+import re
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 # Import shared queue infrastructure
 from queue_core import (
     QueuePaths,
+    TaskOrigin,
+    collect_task_origin,
     get_db,
     init_db,
     ensure_db,
@@ -41,6 +45,52 @@ from queue_core import (
 # Unique identifier for this CLI instance - used to detect orphaned tasks
 # from previous CLI instances even if the PID is reused
 CLI_INSTANCE_ID = str(uuid.uuid4())[:8]
+AMP_CLI_LOG_PATH = Path.home() / ".cache" / "amp" / "logs" / "cli.log"
+AMP_THREAD_ID_PATTERN = re.compile(r"T-[0-9a-f-]{36}")
+AMP_ENV_ASSIGNMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+AMP_GLOBAL_FLAGS_WITH_VALUE = {
+    "--visibility",
+    "--settings-file",
+    "--log-level",
+    "--log-file",
+    "--mcp-config",
+    "-l",
+    "--label",
+}
+AMP_GLOBAL_BOOLEAN_FLAGS = {
+    "--notifications",
+    "--no-notifications",
+    "--color",
+    "--no-color",
+    "--dangerously-allow-all",
+    "--jetbrains",
+    "--no-jetbrains",
+    "--ide",
+    "--no-ide",
+    "--stream-json",
+    "--stream-json-thinking",
+    "--stream-json-input",
+    "--archive",
+}
+
+
+@dataclass
+class AmpSession:
+    pid: int
+    cwd: str | None
+    thread_id: str | None = None
+    agent_session_id: str | None = None
+    mode: str | None = None
+
+    @property
+    def stop_command(self) -> str:
+        return f"kill -TERM {self.pid}"
+
+    @property
+    def continue_command(self) -> str | None:
+        if not self.cwd or not self.thread_id:
+            return None
+        return f"(cd {shlex.quote(self.cwd)} && amp threads continue {self.thread_id})"
 
 
 def get_paths(args) -> QueuePaths:
@@ -251,11 +301,282 @@ def cmd_logs(args):
             print(line)
 
 
+def _extract_env_value(process_line: str, env_name: str) -> str | None:
+    match = re.search(rf"(?:^|\s){re.escape(env_name)}=([^\s]+)", process_line)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    return value or None
+
+
+def _amp_process_prefix_tokens(process_line: str) -> tuple[int, list[str]] | None:
+    line = process_line.strip()
+    if not line:
+        return None
+
+    try:
+        pid_text, command = line.split(None, 1)
+        pid = int(pid_text)
+    except ValueError:
+        return None
+
+    argv = []
+    for token in command.split():
+        if AMP_ENV_ASSIGNMENT_PATTERN.match(token):
+            break
+        argv.append(token)
+
+    if not argv:
+        return None
+
+    return pid, argv
+
+
+def _is_interactive_amp_invocation(argv: list[str]) -> tuple[bool, str | None]:
+    if not argv or Path(argv[0]).name != "amp":
+        return False, None
+
+    remaining: list[str] = []
+    mode: str | None = None
+    i = 1
+    while i < len(argv):
+        token = argv[i]
+        if token in {"-x", "--execute"} or token.startswith("--execute="):
+            return False, mode
+        if token in {"-m", "--mode"}:
+            if i + 1 < len(argv):
+                mode = argv[i + 1]
+            i += 2
+            continue
+        if token.startswith("--mode="):
+            mode = token.split("=", 1)[1] or None
+            i += 1
+            continue
+        if token in AMP_GLOBAL_FLAGS_WITH_VALUE:
+            i += 2
+            continue
+        if any(token.startswith(flag + "=") for flag in AMP_GLOBAL_FLAGS_WITH_VALUE if flag.startswith("--")):
+            i += 1
+            continue
+        if token in AMP_GLOBAL_BOOLEAN_FLAGS:
+            i += 1
+            continue
+        remaining = argv[i:]
+        break
+
+    interactive = not remaining or (
+        len(remaining) >= 2
+        and remaining[0] in {"threads", "thread", "t"}
+        and remaining[1] in {"continue", "c", "new", "n"}
+    )
+    return interactive, mode
+
+
+def parse_amp_sessions_from_ps_output(ps_output: str) -> list[AmpSession]:
+    """Parse `ps eww` output and return live interactive Amp sessions."""
+    sessions: list[AmpSession] = []
+    for line in ps_output.splitlines():
+        prefix = _amp_process_prefix_tokens(line)
+        if prefix is None:
+            continue
+
+        pid, argv = prefix
+        interactive, mode = _is_interactive_amp_invocation(argv)
+        if not interactive:
+            continue
+
+        sessions.append(
+            AmpSession(
+                pid=pid,
+                cwd=_extract_env_value(line, "PWD"),
+                agent_session_id=_extract_env_value(line, "AGENT_SESSION_ID"),
+                mode=mode,
+            )
+        )
+
+    return sessions
+
+
+def parse_amp_thread_ids_from_log(
+    log_text: str,
+    candidate_pids: set[int] | None = None,
+) -> dict[int, str]:
+    """Return the latest known Amp thread ID for each PID in the CLI log."""
+    latest_thread_by_pid: dict[int, tuple[str, str]] = {}
+
+    for raw_line in log_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        try:
+            pid = int(entry["pid"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if candidate_pids is not None and pid not in candidate_pids:
+            continue
+
+        timestamp = entry.get("timestamp")
+        if not isinstance(timestamp, str) or not timestamp:
+            continue
+
+        thread_id = None
+        for key in ("threadId", "threadID", "newThreadID"):
+            value = entry.get(key)
+            if isinstance(value, str) and AMP_THREAD_ID_PATTERN.fullmatch(value):
+                thread_id = value
+
+        if thread_id is None:
+            message = entry.get("message")
+            if isinstance(message, str) and "Switching to thread:" in message:
+                match = AMP_THREAD_ID_PATTERN.search(message)
+                if match:
+                    thread_id = match.group(0)
+
+        if thread_id is None:
+            continue
+
+        current = latest_thread_by_pid.get(pid)
+        if current is None or timestamp >= current[0]:
+            latest_thread_by_pid[pid] = (timestamp, thread_id)
+
+    return {pid: thread_id for pid, (_, thread_id) in latest_thread_by_pid.items()}
+
+
+def discover_amp_sessions(cli_log_path: Path = AMP_CLI_LOG_PATH) -> list[AmpSession]:
+    """Discover live interactive Amp sessions and resolve their current thread IDs."""
+    result = subprocess.run(
+        ["ps", "eww", "-axo", "pid=,command="],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Failed to enumerate running processes with ps")
+
+    sessions = parse_amp_sessions_from_ps_output(result.stdout)
+    if not sessions or not cli_log_path.exists():
+        return sessions
+
+    thread_ids = parse_amp_thread_ids_from_log(
+        cli_log_path.read_text(),
+        candidate_pids={session.pid for session in sessions},
+    )
+    for session in sessions:
+        session.thread_id = thread_ids.get(session.pid)
+
+    return sessions
+
+
+def _amp_session_payload(session: AmpSession) -> dict[str, str | int | None]:
+    return {
+        "pid": session.pid,
+        "mode": session.mode,
+        "agent_session_id": session.agent_session_id,
+        "cwd": session.cwd,
+        "thread_id": session.thread_id,
+        "stop_command": session.stop_command,
+        "continue_command": session.continue_command,
+    }
+
+
+def cmd_amp_restart(args) -> int:
+    """Resolve live interactive Amp sessions to thread IDs and print restart commands."""
+    pid_filter = set(args.pid or [])
+
+    try:
+        sessions = discover_amp_sessions()
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    if pid_filter:
+        sessions = [session for session in sessions if session.pid in pid_filter]
+        found_pids = {session.pid for session in sessions}
+        missing_pids = sorted(pid_filter - found_pids)
+        if missing_pids:
+            joined = ", ".join(str(pid) for pid in missing_pids)
+            print(f"Error: No live interactive Amp session found for PID(s): {joined}", file=sys.stderr)
+            return 1
+
+    unresolved = [session for session in sessions if not session.cwd or not session.thread_id]
+
+    if getattr(args, "json", False):
+        output = {
+            "sessions": [_amp_session_payload(session) for session in sessions],
+            "summary": {
+                "total": len(sessions),
+                "resolved": len(sessions) - len(unresolved),
+                "unresolved": len(unresolved),
+            },
+        }
+        print(json.dumps(output))
+        return 1 if pid_filter and unresolved else 0
+
+    if getattr(args, "shell", False):
+        for index, session in enumerate(sessions):
+            if index:
+                print()
+            if session.continue_command:
+                print(f"# PID {session.pid} thread={session.thread_id} cwd={session.cwd}")
+                print(session.stop_command)
+                print(session.continue_command)
+            else:
+                reason = "missing thread ID" if not session.thread_id else "missing cwd"
+                print(f"# PID {session.pid} unresolved ({reason})", file=sys.stderr)
+        return 1 if pid_filter and unresolved else 0
+
+    if not sessions:
+        print("No live interactive Amp sessions found")
+        return 0
+
+    for session in sessions:
+        session_label = session.agent_session_id or "-"
+        mode_label = session.mode or "-"
+        print(f"PID {session.pid}  session={session_label}  mode={mode_label}")
+        print(f"  cwd: {session.cwd or '(unresolved)'}")
+        print(f"  thread: {session.thread_id or '(unresolved)'}")
+        print(f"  stop: {session.stop_command}")
+        print(f"  continue: {session.continue_command or '(unresolved)'}")
+        print()
+
+    if unresolved:
+        print(
+            f"Unresolved sessions: {len(unresolved)} (missing cwd or thread ID in {AMP_CLI_LOG_PATH})",
+            file=sys.stderr,
+        )
+
+    return 1 if pid_filter and unresolved else 0
+
+
 # --- Run Command Implementation ---
 
 def log_metric(paths: QueuePaths, event: str, **kwargs):
     """Log metric using paths (wrapper for CLI)."""
     _log_metric(paths.metrics_path, event, DEFAULT_MAX_METRICS_SIZE_MB, **kwargs)
+
+
+def task_origin_kwargs(task_origin: TaskOrigin | None) -> dict[str, str]:
+    if task_origin is None:
+        return {}
+
+    return {
+        key: value
+        for key, value in {
+            "working_directory": task_origin.working_directory,
+            "worktree_root": task_origin.worktree_root,
+            "repo_name": task_origin.repo_name,
+            "git_branch": task_origin.git_branch,
+            "agent_name": task_origin.agent_name,
+        }.items()
+        if value
+    }
 
 
 def cleanup_queue(
@@ -297,23 +618,57 @@ def cleanup_queue(
         conn.commit()
 
 
-def register_task(conn, queue_name: str, paths: QueuePaths, command: str = None) -> int:
+def register_task(
+    conn,
+    queue_name: str,
+    paths: QueuePaths,
+    command: str = None,
+    task_origin: TaskOrigin | None = None,
+) -> int:
     """Register a task in the queue. Returns task_id immediately."""
     my_pid = os.getpid()
 
     cursor = conn.execute(
-        "INSERT INTO queue (queue_name, status, pid, server_id, command) VALUES (?, ?, ?, ?, ?)",
-        (queue_name, "waiting", my_pid, CLI_INSTANCE_ID, command),
+        """INSERT INTO queue (
+               queue_name, status, pid, server_id, command,
+               working_directory, worktree_root, repo_name, git_branch, agent_name
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            queue_name,
+            "waiting",
+            my_pid,
+            CLI_INSTANCE_ID,
+            command,
+            task_origin.working_directory if task_origin else None,
+            task_origin.worktree_root if task_origin else None,
+            task_origin.repo_name if task_origin else None,
+            task_origin.git_branch if task_origin else None,
+            task_origin.agent_name if task_origin else None,
+        ),
     )
     conn.commit()
     task_id = cursor.lastrowid
 
-    log_metric(paths, "task_queued", task_id=task_id, queue_name=queue_name, pid=my_pid)
+    log_metric(
+        paths,
+        "task_queued",
+        task_id=task_id,
+        queue_name=queue_name,
+        pid=my_pid,
+        **task_origin_kwargs(task_origin),
+    )
     print(f"[tq] Task #{task_id} queued in '{queue_name}'")
     return task_id
 
 
-def wait_for_turn(conn, queue_name: str, task_id: int, paths: QueuePaths, queue_capacities: dict[str, int]) -> None:
+def wait_for_turn(
+    conn,
+    queue_name: str,
+    task_id: int,
+    paths: QueuePaths,
+    queue_capacities: dict[str, int],
+    task_origin: TaskOrigin | None = None,
+) -> None:
     """Wait for the task's turn to run. Task must already be registered."""
     my_pid = os.getpid()
     queued_at = time.time()
@@ -347,7 +702,9 @@ def wait_for_turn(conn, queue_name: str, task_id: int, paths: QueuePaths, queue_
                 "task_started",
                 task_id=task_id,
                 queue_name=queue_name,
+                pid=my_pid,
                 wait_time_seconds=round(wait_time, 2),
+                **task_origin_kwargs(task_origin),
             )
             if wait_time > 1:
                 print(f"[tq] Lock acquired after {wait_time:.1f}s wait")
@@ -385,6 +742,7 @@ def cmd_run(args):
 
     paths = get_paths(args)
     paths.data_dir.mkdir(parents=True, exist_ok=True)
+    task_origin = collect_task_origin(working_dir)
 
     # Ensure database exists and is valid (recover if corrupted)
     ensure_db(paths)
@@ -441,8 +799,8 @@ def cmd_run(args):
         cleanup_queue(conn, queue_name, paths, queue_capacities)
 
         # Register task first so task_id is available for cleanup if interrupted
-        task_id = register_task(conn, queue_name, paths, command=command)
-        wait_for_turn(conn, queue_name, task_id, paths, queue_capacities)
+        task_id = register_task(conn, queue_name, paths, command=command, task_origin=task_origin)
+        wait_for_turn(conn, queue_name, task_id, paths, queue_capacities, task_origin=task_origin)
 
         print(f"[tq] Running: {command}")
         print(f"[tq] Directory: {working_dir}")
@@ -483,8 +841,10 @@ def cmd_run(args):
                 "task_timeout",
                 task_id=task_id,
                 queue_name=queue_name,
+                pid=os.getpid(),
                 command=command,
                 timeout_seconds=timeout,
+                **task_origin_kwargs(task_origin),
             )
             return 124  # Standard timeout exit code
 
@@ -502,9 +862,11 @@ def cmd_run(args):
             "task_completed",
             task_id=task_id,
             queue_name=queue_name,
+            pid=os.getpid(),
             command=command,
             exit_code=exit_code,
             duration_seconds=round(duration, 2),
+            **task_origin_kwargs(task_origin),
         )
 
         return exit_code
@@ -517,7 +879,9 @@ def cmd_run(args):
                 "task_error",
                 task_id=task_id,
                 queue_name=queue_name,
+                pid=os.getpid(),
                 error=str(e),
+                **task_origin_kwargs(task_origin),
             )
         return 1
 
@@ -576,9 +940,28 @@ def main():
     logs_parser.add_argument("-n", type=int, default=20, help="Number of entries (default: 20)")
     logs_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
+    # amp-restart
+    amp_restart_parser = subparsers.add_parser(
+        "amp-restart",
+        help="Resolve live interactive Amp sessions to thread IDs and print restart commands",
+    )
+    amp_restart_parser.add_argument(
+        "--pid",
+        action="append",
+        type=int,
+        default=[],
+        help="Target a specific live Amp PID. Repeatable. Defaults to all live interactive Amp sessions.",
+    )
+    amp_restart_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    amp_restart_parser.add_argument(
+        "--shell",
+        action="store_true",
+        help="Print shell commands only (kill + amp threads continue)",
+    )
+
     # Handle implicit run: tq ./gradlew build -> tq run ./gradlew build
     # Pre-process argv to insert 'run' if needed
-    known_subcommands = {"run", "list", "clear", "logs"}
+    known_subcommands = {"run", "list", "clear", "logs", "amp-restart"}
     args_list = sys.argv[1:]
 
     # Find the first non-option argument (skip --data-dir and its value)
@@ -614,6 +997,8 @@ def main():
         cmd_clear(args)
     elif args.command == "logs":
         cmd_logs(args)
+    elif args.command == "amp-restart":
+        sys.exit(cmd_amp_restart(args))
     else:
         parser.print_help()
 

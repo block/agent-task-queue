@@ -11,6 +11,7 @@ import os
 import signal
 import shlex
 import sqlite3
+import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -44,6 +45,17 @@ class QueuePaths:
         )
 
 
+@dataclass(frozen=True)
+class TaskOrigin:
+    """Optional metadata about where a queued task came from."""
+
+    working_directory: str
+    worktree_root: str | None = None
+    repo_name: str | None = None
+    git_branch: str | None = None
+    agent_name: str | None = None
+
+
 # --- Database Schema ---
 QUEUE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS queue (
@@ -54,6 +66,11 @@ CREATE TABLE IF NOT EXISTS queue (
     server_id TEXT,
     child_pid INTEGER,
     command TEXT,
+    working_directory TEXT,
+    worktree_root TEXT,
+    repo_name TEXT,
+    git_branch TEXT,
+    agent_name TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
@@ -67,6 +84,26 @@ ALTER TABLE queue ADD COLUMN server_id TEXT
 # Migration to add command column to existing databases
 QUEUE_MIGRATION_COMMAND = """
 ALTER TABLE queue ADD COLUMN command TEXT
+"""
+
+QUEUE_MIGRATION_WORKING_DIRECTORY = """
+ALTER TABLE queue ADD COLUMN working_directory TEXT
+"""
+
+QUEUE_MIGRATION_WORKTREE_ROOT = """
+ALTER TABLE queue ADD COLUMN worktree_root TEXT
+"""
+
+QUEUE_MIGRATION_REPO_NAME = """
+ALTER TABLE queue ADD COLUMN repo_name TEXT
+"""
+
+QUEUE_MIGRATION_GIT_BRANCH = """
+ALTER TABLE queue ADD COLUMN git_branch TEXT
+"""
+
+QUEUE_MIGRATION_AGENT_NAME = """
+ALTER TABLE queue ADD COLUMN agent_name TEXT
 """
 
 QUEUE_INDEX = """
@@ -99,11 +136,68 @@ def init_db(paths: QueuePaths):
         conn.execute(QUEUE_SCHEMA)
         conn.execute(QUEUE_INDEX)
         # Run migrations for existing databases
-        for migration in [QUEUE_MIGRATION_SERVER_ID, QUEUE_MIGRATION_COMMAND]:
+        for migration in [
+            QUEUE_MIGRATION_SERVER_ID,
+            QUEUE_MIGRATION_COMMAND,
+            QUEUE_MIGRATION_WORKING_DIRECTORY,
+            QUEUE_MIGRATION_WORKTREE_ROOT,
+            QUEUE_MIGRATION_REPO_NAME,
+            QUEUE_MIGRATION_GIT_BRANCH,
+            QUEUE_MIGRATION_AGENT_NAME,
+        ]:
             try:
                 conn.execute(migration)
             except sqlite3.OperationalError:
                 pass  # Column already exists
+
+
+def collect_task_origin(working_directory: str, agent_name: str | None = None) -> TaskOrigin:
+    """Capture stable repo/worktree metadata for a queued task."""
+    resolved_working_directory = str(Path(working_directory).resolve())
+    worktree_root = _git_output(resolved_working_directory, "rev-parse", "--show-toplevel")
+    repo_name = _git_repo_name(resolved_working_directory)
+    git_branch = _git_output(resolved_working_directory, "branch", "--show-current")
+
+    if not git_branch:
+        git_branch = _git_output(resolved_working_directory, "rev-parse", "--short", "HEAD")
+
+    return TaskOrigin(
+        working_directory=resolved_working_directory,
+        worktree_root=worktree_root,
+        repo_name=repo_name,
+        git_branch=git_branch,
+        agent_name=agent_name or None,
+    )
+
+
+def _git_repo_name(working_directory: str) -> str | None:
+    remote = _git_output(working_directory, "remote", "get-url", "origin")
+    if remote:
+        return remote.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+
+    worktree_root = _git_output(working_directory, "rev-parse", "--show-toplevel")
+    if worktree_root:
+        return Path(worktree_root).name
+
+    return None
+
+
+def _git_output(working_directory: str, *args: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", working_directory, *args],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    value = result.stdout.strip()
+    return value or None
 
 
 def normalize_queue_name(queue_name: str) -> str:

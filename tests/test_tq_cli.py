@@ -3,6 +3,7 @@ Test suite for the tq CLI tool.
 Tests the command-line interface for running tasks and inspecting the queue.
 """
 
+import argparse
 import json
 import os
 import signal
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import TypeVar
 
 import pytest
+import tq
 
 # Path to tq.py
 TQ_PATH = Path(__file__).parent.parent / "tq.py"
@@ -586,6 +588,115 @@ class TestTqHelp:
         assert "--queue" in result.stdout
         assert "--timeout" in result.stdout
         assert "--dir" in result.stdout
+
+
+class TestAmpRestart:
+    def test_parse_amp_sessions_filters_to_interactive_invocations(self):
+        ps_output = """
+86296 amp -m deep PWD=/Users/sedwards/Development/block-invert-config AGENT_SESSION_ID=20260420_6
+88150 amp threads continue T-019dbffa-53be-708c-b468-b62fff98a27d PWD=/Users/sedwards/Development/agent-task-queue
+90000 amp threads search --json repo:block/agent-task-queue PWD=/tmp
+91000 /Users/sedwards/.amp/bin/amp --mode=smart PWD=/Users/sedwards/Development/agents AGENT_SESSION_ID=20260422_11
+        """
+
+        sessions = tq.parse_amp_sessions_from_ps_output(ps_output)
+
+        assert [(session.pid, session.mode) for session in sessions] == [
+            (86296, "deep"),
+            (88150, None),
+            (91000, "smart"),
+        ]
+        assert sessions[0].cwd == "/Users/sedwards/Development/block-invert-config"
+        assert sessions[0].agent_session_id == "20260420_6"
+        assert sessions[1].cwd == "/Users/sedwards/Development/agent-task-queue"
+
+    def test_parse_amp_thread_ids_uses_latest_entry_per_pid(self):
+        log_text = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "pid": 86296,
+                        "timestamp": "2026-04-24T15:00:00.000Z",
+                        "threadId": "T-019dbffa-53be-708c-b468-b62fff98a27d",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "pid": 86296,
+                        "timestamp": "2026-04-24T15:05:00.000Z",
+                        "message": "[switchToExistingThread] Switching to thread: T-019dc029-f25d-767c-8005-e2996169f6f8",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "pid": 88150,
+                        "timestamp": "2026-04-24T15:10:00.000Z",
+                        "newThreadID": "T-019dbfd5-6e1d-7548-b824-f87378e25a8e",
+                    }
+                ),
+            ]
+        )
+
+        assert tq.parse_amp_thread_ids_from_log(log_text, {86296, 88150}) == {
+            86296: "T-019dc029-f25d-767c-8005-e2996169f6f8",
+            88150: "T-019dbfd5-6e1d-7548-b824-f87378e25a8e",
+        }
+
+    def test_amp_restart_shell_output_for_targeted_pids(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            tq,
+            "discover_amp_sessions",
+            lambda: [
+                tq.AmpSession(
+                    pid=86296,
+                    cwd="/Users/sedwards/Development/block-invert-config",
+                    thread_id="T-019dc029-f25d-767c-8005-e2996169f6f8",
+                    agent_session_id="20260420_6",
+                    mode="deep",
+                ),
+                tq.AmpSession(
+                    pid=88150,
+                    cwd="/Users/sedwards/Development/agent-task-queue",
+                    thread_id="T-019dbffa-53be-708c-b468-b62fff98a27d",
+                    mode="deep",
+                ),
+            ],
+        )
+
+        exit_code = tq.cmd_amp_restart(
+            argparse.Namespace(pid=[86296], json=False, shell=True)
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert "kill -TERM 86296" in captured.out
+        assert "amp threads continue T-019dc029-f25d-767c-8005-e2996169f6f8" in captured.out
+        assert "88150" not in captured.out
+
+    def test_amp_restart_json_fails_for_unresolved_targeted_pid(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            tq,
+            "discover_amp_sessions",
+            lambda: [
+                tq.AmpSession(
+                    pid=86296,
+                    cwd="/Users/sedwards/Development/block-invert-config",
+                    thread_id=None,
+                    agent_session_id="20260420_6",
+                    mode="deep",
+                )
+            ],
+        )
+
+        exit_code = tq.cmd_amp_restart(
+            argparse.Namespace(pid=[86296], json=True, shell=False)
+        )
+
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert exit_code == 1
+        assert payload["summary"] == {"total": 1, "resolved": 0, "unresolved": 1}
+        assert payload["sessions"][0]["thread_id"] is None
 
 
 class TestQueueIntegration:

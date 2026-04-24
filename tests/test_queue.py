@@ -5,6 +5,7 @@ Uses FastMCP's Client API for proper in-memory testing.
 
 import pytest
 import asyncio
+import json
 import os
 import subprocess
 import time
@@ -43,6 +44,8 @@ def clean_db():
     """Clean database before each test."""
     if DB_PATH.exists():
         DB_PATH.unlink()
+    if PATHS.metrics_path.exists():
+        PATHS.metrics_path.unlink()
     # Also remove WAL files if present
     wal_path = Path(str(DB_PATH) + "-wal")
     shm_path = Path(str(DB_PATH) + "-shm")
@@ -79,6 +82,85 @@ def read_output_file(result_str: str) -> str:
         if Path(path).exists():
             return Path(path).read_text()
     return ""
+
+
+def create_git_repo(tmp_path: Path, name: str) -> Path:
+    repo_dir = tmp_path / name
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
+    (repo_dir / "README.md").write_text("test repo\n")
+    subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "init",
+        ],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+    return repo_dir
+
+
+@pytest.mark.asyncio
+async def test_task_origin_is_persisted_in_queue_and_metrics(client, tmp_path):
+    repo_dir = create_git_repo(tmp_path, "metadata-repo")
+    expected_origin = queue_core.collect_task_origin(str(repo_dir), "amp")
+
+    async with client:
+        result_task = asyncio.create_task(
+            client.call_tool(
+                "run_task",
+                {
+                    "command": "sleep 1",
+                    "working_directory": str(repo_dir),
+                    "queue_name": "metadata_test",
+                    "agent_name": "amp",
+                },
+            )
+        )
+
+        await asyncio.sleep(0.2)
+
+        with get_db() as conn:
+            row = conn.execute(
+                """SELECT id, pid, working_directory, worktree_root, repo_name, git_branch, agent_name
+                   FROM queue
+                   WHERE queue_name = ? AND status = 'running'""",
+                ("metadata_test",),
+            ).fetchone()
+
+        assert row is not None
+        assert row["working_directory"] == expected_origin.working_directory
+        assert row["worktree_root"] == expected_origin.worktree_root
+        assert row["repo_name"] == expected_origin.repo_name
+        assert row["git_branch"] == expected_origin.git_branch
+        assert row["agent_name"] == expected_origin.agent_name
+
+        task_id = row["id"]
+        pid = row["pid"]
+        result = await result_task
+
+    assert "SUCCESS" in str(result)
+
+    entries = [json.loads(line) for line in PATHS.metrics_path.read_text().splitlines() if line.strip()]
+    task_entries = [entry for entry in entries if entry.get("task_id") == task_id]
+
+    assert {entry["event"] for entry in task_entries} >= {"task_queued", "task_started", "task_completed"}
+    for entry in task_entries:
+        if entry["event"] in {"task_queued", "task_started", "task_completed"}:
+            assert entry["pid"] == pid
+            assert entry["working_directory"] == expected_origin.working_directory
+            assert entry["worktree_root"] == expected_origin.worktree_root
+            assert entry["repo_name"] == expected_origin.repo_name
+            assert entry["git_branch"] == expected_origin.git_branch
+            assert entry["agent_name"] == expected_origin.agent_name
 
 
 @pytest.mark.asyncio

@@ -10,10 +10,16 @@ object TaskQueueDatabase {
     }
 
     fun loadSnapshot(dataDir: Path): QueueSnapshot {
+        val configuration = TaskQueueProcessInspector.loadConfiguration(dataDir)
+        val adb = AdbInspector.loadSnapshot()
+        val metrics = TaskQueueMetrics.loadSnapshot(dataDir)
         val dbPath = dataDir.resolve("queue.db")
         if (!dbPath.toFile().exists()) {
             return QueueSnapshot.empty(
                 dataDir = dataDir,
+                configuration = configuration,
+                adb = adb,
+                metrics = metrics,
                 statusMessage = "Waiting for queue database at $dbPath",
             )
         }
@@ -27,6 +33,7 @@ object TaskQueueDatabase {
 
                 connection.createStatement().use { statement ->
                     statement.executeQuery("SELECT * FROM queue ORDER BY queue_name, id").use { rs ->
+                        val availableColumns = rs.columnNames()
                         val tasks = mutableListOf<QueueTask>()
                         while (rs.next()) {
                             tasks += QueueTask(
@@ -38,12 +45,20 @@ object TaskQueueDatabase {
                                 childPid = rs.getNullableInt("child_pid"),
                                 createdAt = rs.getString("created_at"),
                                 updatedAt = rs.getString("updated_at"),
+                                workingDirectory = rs.getOptionalString(availableColumns, "working_directory"),
+                                worktreeRoot = rs.getOptionalString(availableColumns, "worktree_root"),
+                                repoName = rs.getOptionalString(availableColumns, "repo_name"),
+                                gitBranch = rs.getOptionalString(availableColumns, "git_branch"),
+                                agentName = rs.getOptionalString(availableColumns, "agent_name"),
                             )
                         }
 
                         QueueSnapshot.fromTasks(
                             dataDir = dataDir,
                             tasks = tasks,
+                            configuration = configuration,
+                            adb = adb,
+                            metrics = metrics,
                             statusMessage = if (tasks.isEmpty()) "Queue is empty" else null,
                         )
                     }
@@ -52,6 +67,9 @@ object TaskQueueDatabase {
         }.getOrElse { error ->
             QueueSnapshot.empty(
                 dataDir = dataDir,
+                configuration = configuration,
+                adb = adb,
+                metrics = metrics,
                 errorMessage = error.message ?: "Failed to read $dbPath",
             )
         }
@@ -66,4 +84,22 @@ private fun ResultSet.getNullableInt(columnName: String): Int? {
         is Number -> value.toInt()
         else -> value.toString().toIntOrNull()
     }
+}
+
+private fun ResultSet.columnNames(): Set<String> {
+    val metadata = metaData
+    return (1..metadata.columnCount)
+        .map { index -> metadata.getColumnLabel(index).lowercase() }
+        .toSet()
+}
+
+private fun ResultSet.getOptionalString(
+    availableColumns: Set<String>,
+    columnName: String,
+): String? {
+    if (columnName.lowercase() !in availableColumns) {
+        return null
+    }
+
+    return getString(columnName)?.takeIf { it.isNotBlank() }
 }

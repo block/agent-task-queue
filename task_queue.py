@@ -28,11 +28,13 @@ from mcp.types import TextContent
 # Import shared queue infrastructure
 from queue_core import (
     QueuePaths,
+    TaskOrigin,
     get_db as _get_db,
     init_db as _init_db,
     ensure_db as _ensure_db,
     cleanup_queue as _cleanup_queue,
     cleanup_targets_for_queue,
+    collect_task_origin,
     log_metric as _log_metric,
     log_fmt,
     is_process_alive,
@@ -156,6 +158,23 @@ def log_metric(event: str, **kwargs):
     _log_metric(PATHS.metrics_path, event, MAX_METRICS_SIZE_MB, **kwargs)
 
 
+def task_origin_kwargs(task_origin: TaskOrigin | None) -> dict[str, str]:
+    if task_origin is None:
+        return {}
+
+    return {
+        key: value
+        for key, value in {
+            "working_directory": task_origin.working_directory,
+            "worktree_root": task_origin.worktree_root,
+            "repo_name": task_origin.repo_name,
+            "git_branch": task_origin.git_branch,
+            "agent_name": task_origin.agent_name,
+        }.items()
+        if value
+    }
+
+
 def cleanup_queue(conn, queue_name: str, queue_capacities: dict[str, int] | None = None):
     """Clean up queue using configured paths and detect orphaned tasks."""
     if queue_capacities is None:
@@ -269,7 +288,11 @@ def get_memory_mb() -> float:
 
 
 # --- Core Queue Logic ---
-async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
+async def wait_for_turn(
+    queue_name: str,
+    command: str | None = None,
+    task_origin: TaskOrigin | None = None,
+) -> int:
     """Register task, wait for turn, return task ID when acquired."""
     queue_name = normalize_queue_name(queue_name)
 
@@ -290,8 +313,22 @@ async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
 
     with get_db() as conn:
         cursor = conn.execute(
-            "INSERT INTO queue (queue_name, status, pid, server_id, command) VALUES (?, ?, ?, ?, ?)",
-            (queue_name, "waiting", my_pid, SERVER_INSTANCE_ID, command),
+            """INSERT INTO queue (
+                   queue_name, status, pid, server_id, command,
+                   working_directory, worktree_root, repo_name, git_branch, agent_name
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                queue_name,
+                "waiting",
+                my_pid,
+                SERVER_INSTANCE_ID,
+                command,
+                task_origin.working_directory if task_origin else None,
+                task_origin.worktree_root if task_origin else None,
+                task_origin.repo_name if task_origin else None,
+                task_origin.git_branch if task_origin else None,
+                task_origin.agent_name if task_origin else None,
+            ),
         )
         task_id = cursor.lastrowid
 
@@ -299,7 +336,13 @@ async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
     with _active_task_ids_lock:
         _active_task_ids.add(task_id)
 
-    log_metric("task_queued", task_id=task_id, queue_name=queue_name, pid=my_pid)
+    log_metric(
+        "task_queued",
+        task_id=task_id,
+        queue_name=queue_name,
+        pid=my_pid,
+        **task_origin_kwargs(task_origin),
+    )
     queued_at = time.time()
 
     if ctx:
@@ -330,7 +373,9 @@ async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
                             "task_started",
                             task_id=task_id,
                             queue_name=queue_name,
+                            pid=my_pid,
                             wait_time_seconds=round(wait_time, 2),
+                            **task_origin_kwargs(task_origin),
                         )
                         if ctx:
                             await ctx.info(log_fmt("Lock ACQUIRED. Starting execution."))
@@ -361,7 +406,9 @@ async def wait_for_turn(queue_name: str, command: str | None = None) -> int:
             "task_cancelled",
             task_id=task_id,
             queue_name=queue_name,
+            pid=my_pid,
             reason="client_disconnected",
+            **task_origin_kwargs(task_origin),
         )
         with get_db() as conn:
             conn.execute("DELETE FROM queue WHERE id = ?", (task_id,))
@@ -406,6 +453,7 @@ async def run_task(
     queue_name: str = "global",
     timeout_seconds: int = 1200,
     env_vars: str = "",
+    agent_name: str = "",
 ):
     """
     Execute a command through the task queue for sequential processing.
@@ -458,6 +506,7 @@ async def run_task(
         timeout_seconds: Max **execution** time before killing the task (default: 1200 = 20 mins).
             Queue wait time does NOT count against this timeout.
         env_vars: Environment variables to set, format: "KEY1=value1,KEY2=value2"
+        agent_name: Optional friendly caller label (for example `amp` or `claude-code`).
 
     Returns:
         Command output including stdout, stderr, and exit code.
@@ -481,7 +530,16 @@ async def run_task(
                 key, value = pair.split("=", 1)
                 env[key.strip()] = value.strip()
 
-    task_id = await wait_for_turn(queue_name, command)
+    ctx = None
+    try:
+        ctx = get_context()
+    except LookupError:
+        pass
+
+    caller_name = agent_name.strip() or (ctx.client_id if ctx and ctx.client_id else None)
+    task_origin = collect_task_origin(working_directory, caller_name)
+
+    task_id = await wait_for_turn(queue_name, command, task_origin=task_origin)
     mem_before = get_memory_mb()
 
     start = time.time()
@@ -580,9 +638,11 @@ async def run_task(
                     "task_timeout",
                     task_id=task_id,
                     queue_name=queue_name,
+                    pid=os.getpid(),
                     command=command,
                     timeout_seconds=timeout_seconds,
                     memory_mb=round(get_memory_mb(), 1),
+                    **task_origin_kwargs(task_origin),
                 )
                 cleanup_output_files()
 
@@ -607,6 +667,7 @@ async def run_task(
             "task_completed",
             task_id=task_id,
             queue_name=queue_name,
+            pid=os.getpid(),
             command=command,
             exit_code=proc.returncode,
             duration_seconds=round(duration, 2),
@@ -614,6 +675,7 @@ async def run_task(
             stderr_lines=stderr_count,
             memory_before_mb=round(mem_before, 1),
             memory_after_mb=round(mem_after, 1),
+            **task_origin_kwargs(task_origin),
         )
         cleanup_output_files()
 
@@ -654,8 +716,10 @@ async def run_task(
             "task_cancelled",
             task_id=task_id,
             queue_name=queue_name,
+            pid=os.getpid(),
             command=command,
             reason="client_disconnected_during_execution",
+            **task_origin_kwargs(task_origin),
         )
         try:
             os.killpg(proc.pid, signal.SIGTERM)
@@ -672,8 +736,10 @@ async def run_task(
             "task_error",
             task_id=task_id,
             queue_name=queue_name,
+            pid=os.getpid(),
             command=command,
             error=str(e),
+            **task_origin_kwargs(task_origin),
         )
         return f"ERROR: {str(e)}"
 
