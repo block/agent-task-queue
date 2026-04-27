@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import TypeVar
 
 import pytest
-import tq
 
 # Path to tq.py
 TQ_PATH = Path(__file__).parent.parent / "tq.py"
