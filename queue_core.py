@@ -24,6 +24,7 @@ POLL_INTERVAL_WAITING = float(os.environ.get("TASK_QUEUE_POLL_WAITING", "1"))
 DEFAULT_MAX_LOCK_AGE_MINUTES = 120
 DEFAULT_MAX_METRICS_SIZE_MB = 5
 QUEUE_SCOPE_SEPARATOR = "/"
+GIT_METADATA_TIMEOUT_SECONDS = 2
 
 
 @dataclass
@@ -202,12 +203,7 @@ def init_db(paths: QueuePaths):
 def collect_task_origin(working_directory: str, agent_name: str | None = None) -> TaskOrigin:
     """Capture stable repo/worktree metadata for a queued task."""
     resolved_working_directory = str(Path(working_directory).resolve())
-    worktree_root = _git_output(resolved_working_directory, "rev-parse", "--show-toplevel")
-    repo_name = _git_repo_name(resolved_working_directory)
-    git_branch = _git_output(resolved_working_directory, "branch", "--show-current")
-
-    if not git_branch:
-        git_branch = _git_output(resolved_working_directory, "rev-parse", "--short", "HEAD")
+    worktree_root, repo_name, git_branch = _git_context(resolved_working_directory)
 
     return TaskOrigin(
         working_directory=resolved_working_directory,
@@ -218,34 +214,64 @@ def collect_task_origin(working_directory: str, agent_name: str | None = None) -
     )
 
 
-def _git_repo_name(working_directory: str) -> str | None:
-    remote = _git_output(working_directory, "remote", "get-url", "origin")
-    if remote:
-        return remote.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+def _git_context(working_directory: str) -> tuple[str | None, str | None, str | None]:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                working_directory,
+                "rev-parse",
+                "--show-toplevel",
+                "--git-common-dir",
+                "--symbolic-full-name",
+                "HEAD",
+                "HEAD",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=GIT_METADATA_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, None, None
 
-    worktree_root = _git_output(working_directory, "rev-parse", "--show-toplevel")
+    if result.returncode != 0:
+        return None, None, None
+
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) < 4:
+        return None, None, None
+
+    worktree_root, git_common_dir, head_oid, head_ref = lines[:4]
+    repo_name = _git_repo_name_from_common_dir(
+        working_directory,
+        worktree_root,
+        git_common_dir,
+    )
+    git_branch = (
+        head_ref.removeprefix("refs/heads/")
+        if head_ref.startswith("refs/heads/")
+        else head_oid[:7] or None
+    )
+    return worktree_root or None, repo_name, git_branch
+
+
+def _git_repo_name_from_common_dir(
+    working_directory: str,
+    worktree_root: str | None,
+    git_common_dir: str,
+) -> str | None:
+    common_dir_path = Path(git_common_dir)
+    if not common_dir_path.is_absolute():
+        common_dir_path = (Path(working_directory) / common_dir_path).resolve()
+
+    if common_dir_path.name == ".git":
+        return common_dir_path.parent.name or None
+
     if worktree_root:
         return Path(worktree_root).name
 
     return None
-
-
-def _git_output(working_directory: str, *args: str) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "-C", working_directory, *args],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-
-    if result.returncode != 0:
-        return None
-
-    value = result.stdout.strip()
-    return value or None
 
 
 def normalize_queue_name(queue_name: str) -> str:
