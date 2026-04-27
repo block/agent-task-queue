@@ -196,8 +196,9 @@ def init_db(paths: QueuePaths):
         ]:
             try:
                 conn.execute(migration)
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
 
 
 def collect_task_origin(working_directory: str, agent_name: str | None = None) -> TaskOrigin:
