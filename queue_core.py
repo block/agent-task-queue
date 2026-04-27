@@ -74,6 +74,36 @@ def task_origin_kwargs(task_origin: "TaskOrigin | None") -> dict[str, str]:
     }
 
 
+def insert_waiting_task(
+    conn,
+    queue_name: str,
+    pid: int,
+    server_id: str,
+    command: str | None = None,
+    task_origin: "TaskOrigin | None" = None,
+) -> int:
+    """Insert a waiting task row and return its task ID."""
+    cursor = conn.execute(
+        """INSERT INTO queue (
+               queue_name, status, pid, server_id, command,
+               working_directory, worktree_root, repo_name, git_branch, agent_name
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            queue_name,
+            "waiting",
+            pid,
+            server_id,
+            command,
+            task_origin.working_directory if task_origin else None,
+            task_origin.worktree_root if task_origin else None,
+            task_origin.repo_name if task_origin else None,
+            task_origin.git_branch if task_origin else None,
+            task_origin.agent_name if task_origin else None,
+        ),
+    )
+    return cursor.lastrowid
+
+
 # --- Database Schema ---
 QUEUE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS queue (

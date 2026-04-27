@@ -34,6 +34,7 @@ from queue_core import (
     release_lock,
     is_process_alive,
     kill_process_tree,
+    insert_waiting_task,
     normalize_queue_name,
     parse_queue_capacities,
     attempt_task_start,
@@ -660,26 +661,15 @@ def register_task(
     """Register a task in the queue. Returns task_id immediately."""
     my_pid = os.getpid()
 
-    cursor = conn.execute(
-        """INSERT INTO queue (
-               queue_name, status, pid, server_id, command,
-               working_directory, worktree_root, repo_name, git_branch, agent_name
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            queue_name,
-            "waiting",
-            my_pid,
-            CLI_INSTANCE_ID,
-            command,
-            task_origin.working_directory if task_origin else None,
-            task_origin.worktree_root if task_origin else None,
-            task_origin.repo_name if task_origin else None,
-            task_origin.git_branch if task_origin else None,
-            task_origin.agent_name if task_origin else None,
-        ),
+    task_id = insert_waiting_task(
+        conn,
+        queue_name,
+        my_pid,
+        CLI_INSTANCE_ID,
+        command=command,
+        task_origin=task_origin,
     )
     conn.commit()
-    task_id = cursor.lastrowid
 
     log_metric(
         paths,

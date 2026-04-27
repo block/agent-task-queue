@@ -39,6 +39,7 @@ from queue_core import (
     log_fmt,
     is_process_alive,
     kill_process_tree,
+    insert_waiting_task,
     normalize_queue_name,
     parse_queue_capacities,
     attempt_task_start,
@@ -296,25 +297,14 @@ async def wait_for_turn(
         pass  # Running outside request context (e.g., in tests)
 
     with get_db() as conn:
-        cursor = conn.execute(
-            """INSERT INTO queue (
-                   queue_name, status, pid, server_id, command,
-                   working_directory, worktree_root, repo_name, git_branch, agent_name
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                queue_name,
-                "waiting",
-                my_pid,
-                SERVER_INSTANCE_ID,
-                command,
-                task_origin.working_directory if task_origin else None,
-                task_origin.worktree_root if task_origin else None,
-                task_origin.repo_name if task_origin else None,
-                task_origin.git_branch if task_origin else None,
-                task_origin.agent_name if task_origin else None,
-            ),
+        task_id = insert_waiting_task(
+            conn,
+            queue_name,
+            my_pid,
+            SERVER_INSTANCE_ID,
+            command=command,
+            task_origin=task_origin,
         )
-        task_id = cursor.lastrowid
 
     # Track this task as active for orphan detection
     with _active_task_ids_lock:
