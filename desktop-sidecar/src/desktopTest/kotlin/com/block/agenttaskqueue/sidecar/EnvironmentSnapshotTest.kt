@@ -8,6 +8,19 @@ import kotlin.test.assertTrue
 
 class EnvironmentSnapshotTest {
     @Test
+    fun commandRunnerDrainsLargeStdoutWithoutTimingOut() {
+        val result = runCommand(
+            "python3",
+            "-c",
+            "import sys; sys.stdout.write('x' * 200000)",
+        )
+
+        assertEquals(null, result.errorMessage)
+        assertEquals(0, result.exitCode)
+        assertEquals(200000, result.output.length)
+    }
+
+    @Test
     fun parsesLiveTaskQueueServerCapacitiesFromPsOutput() {
         val processes = parseTaskQueueProcesses(
             """
@@ -29,6 +42,31 @@ class EnvironmentSnapshotTest {
         val process = parseTaskQueueProcesses(
             """
             73781 1 /Users/me/.venv/bin/python3 task_queue.py --queue-capacity=gradle=2 TASK_QUEUE_DATA_DIR=/tmp/custom-queue
+            """.trimIndent()
+        ).single()
+
+        assertEquals(Paths.get("/tmp/custom-queue"), process.dataDir)
+        assertEquals(2, process.queueCapacities["gradle"])
+    }
+
+    @Test
+    fun parsesInstalledAgentTaskQueueEntrypointLaunchedUnderPython() {
+        val process = parseTaskQueueProcesses(
+            """
+            73781 1 /Users/me/.venv/bin/python3 /Users/me/.venv/bin/agent-task-queue --queue-capacity=gradle=2 --queue-capacity=gradle/emulator-5554=1 TASK_QUEUE_DATA_DIR=/tmp/custom-queue
+            """.trimIndent()
+        ).single()
+
+        assertEquals(Paths.get("/tmp/custom-queue"), process.dataDir)
+        assertEquals(2, process.queueCapacities["gradle"])
+        assertEquals(1, process.queueCapacities["gradle/emulator-5554"])
+    }
+
+    @Test
+    fun parsesInstalledEntrypointWhenPythonUsesFlagValuesWithEquals() {
+        val process = parseTaskQueueProcesses(
+            """
+            73781 1 /Users/me/.venv/bin/python3 -X faulthandler=1 /Users/me/.venv/bin/agent-task-queue --queue-capacity=gradle=2 TASK_QUEUE_DATA_DIR=/tmp/custom-queue
             """.trimIndent()
         ).single()
 

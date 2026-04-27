@@ -2,12 +2,14 @@ package com.block.agenttaskqueue.sidecar
 
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 private val DEFAULT_QUEUE_DATA_DIR: Path = Paths.get("/tmp/agent-task-queue").toAbsolutePath().normalize()
 private const val COMMAND_TIMEOUT_SECONDS = 5L
 private val EMULATOR_SERIAL_PATTERN = Regex("^(?:emu|emulator)-(\\d+)$", RegexOption.IGNORE_CASE)
 private val LOCALHOST_EMULATOR_PATTERN = Regex("^(?:127\\.0\\.0\\.1|localhost):(\\d+)$", RegexOption.IGNORE_CASE)
+private val TASK_QUEUE_ENTRYPOINT_NAMES = setOf("agent-task-queue", "task_queue", "task_queue.py")
 
 data class QueueConfigurationSnapshot(
     val serverProcesses: List<QueueServerProcess>,
@@ -288,12 +290,41 @@ private fun looksLikeTaskQueueServer(tokens: List<String>): Boolean {
 
     val executable = tokens.first().substringAfterLast('/')
     if (executable.startsWith("python")) {
-        return tokens.any { it.endsWith("task_queue.py") }
+        return firstPythonEntrypointToken(tokens.drop(1))
+            ?.let(::looksLikeTaskQueueEntrypoint)
+            ?: false
     }
 
-    return executable == "agent-task-queue" ||
-        executable == "task_queue" ||
-        executable == "task_queue.py"
+    return tokens.first().let(::looksLikeTaskQueueEntrypoint)
+}
+
+private fun looksLikeTaskQueueEntrypoint(token: String): Boolean {
+    return token.substringAfterLast('/') in TASK_QUEUE_ENTRYPOINT_NAMES
+}
+
+private fun firstPythonEntrypointToken(tokens: List<String>): String? {
+    var index = 0
+    while (index < tokens.size) {
+        val token = tokens[index]
+        when {
+            token == "-m" -> return tokens.getOrNull(index + 1)
+            token == "-c" -> return null
+            token == "-W" || token == "-X" -> index += 2
+            token.startsWith('-') -> index += 1
+            looksLikeEnvironmentAssignment(token) -> index += 1
+            else -> return token
+        }
+    }
+    return null
+}
+
+private fun looksLikeEnvironmentAssignment(token: String): Boolean {
+    val separator = token.indexOf('=')
+    if (separator <= 0) return false
+
+    val name = token.substring(0, separator)
+    val startsLikeEnvName = name.firstOrNull()?.let { it == '_' || it.isLetter() } == true
+    return startsLikeEnvName && name.all { it == '_' || it.isLetterOrDigit() }
 }
 
 private fun inferProcessAgentLabel(
@@ -455,14 +486,19 @@ private fun parseAdbDevice(line: String): AdbDevice? {
     )
 }
 
-private fun runCommand(vararg command: String): CommandResult {
+internal fun runCommand(vararg command: String): CommandResult {
+    val outputReader = Executors.newSingleThreadExecutor()
     return try {
         val process = ProcessBuilder(*command)
             .redirectErrorStream(true)
             .start()
+        val outputFuture = outputReader.submit<String> {
+            process.inputStream.bufferedReader().use { it.readText() }
+        }
         if (!process.waitFor(COMMAND_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
             process.destroyForcibly()
             process.waitFor()
+            outputFuture.cancel(true)
             return CommandResult(
                 output = "",
                 exitCode = -1,
@@ -470,7 +506,7 @@ private fun runCommand(vararg command: String): CommandResult {
             )
         }
 
-        val output = process.inputStream.bufferedReader().use { it.readText() }
+        val output = outputFuture.get()
         CommandResult(output = output.trim(), exitCode = process.exitValue())
     } catch (error: Exception) {
         CommandResult(
@@ -478,6 +514,8 @@ private fun runCommand(vararg command: String): CommandResult {
             exitCode = -1,
             errorMessage = error.message ?: "Failed to run `${command.joinToString(" ")}`.",
         )
+    } finally {
+        outputReader.shutdownNow()
     }
 }
 
