@@ -16,6 +16,7 @@ import sys
 import time
 import uuid
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -426,14 +427,15 @@ def _extract_thread_id_from_log_entry(entry: dict, *, allow_session_state: bool 
 
 
 def parse_amp_thread_ids_from_log(
-    log_text: str,
+    log_lines: Iterable[str] | str,
     candidate_pids: set[int] | None = None,
 ) -> dict[int, str]:
     """Return the latest known Amp thread ID for each live PID in the CLI log."""
     latest_thread_by_pid: dict[int, tuple[str, str]] = {}
     latest_session_start_by_pid: dict[int, str] = {}
+    line_iterator = log_lines.splitlines() if isinstance(log_lines, str) else log_lines
 
-    for raw_line in log_text.splitlines():
+    for raw_line in line_iterator:
         line = raw_line.strip()
         if not line:
             continue
@@ -514,10 +516,11 @@ def discover_amp_sessions(cli_log_path: Path = AMP_CLI_LOG_PATH) -> list[AmpSess
     if not sessions or not cli_log_path.exists():
         return sessions
 
-    thread_ids = parse_amp_thread_ids_from_log(
-        cli_log_path.read_text(),
-        candidate_pids={session.pid for session in sessions},
-    )
+    with cli_log_path.open() as cli_log:
+        thread_ids = parse_amp_thread_ids_from_log(
+            cli_log,
+            candidate_pids={session.pid for session in sessions},
+        )
     for session in sessions:
         session.thread_id = thread_ids.get(session.pid)
 
