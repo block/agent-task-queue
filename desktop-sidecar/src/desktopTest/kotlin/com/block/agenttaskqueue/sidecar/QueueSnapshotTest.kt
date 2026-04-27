@@ -83,16 +83,16 @@ class QueueSnapshotTest {
             childPid = 8112,
             createdAt = null,
             updatedAt = null,
-            workingDirectory = "/Users/me/Development/agent-task-queue",
-            worktreeRoot = "/Users/me/Development/agent-task-queue-worktrees/queue-visibility",
-            repoName = "agent-task-queue",
-            gitBranch = "sedwards/no-ticket/queue-visibility",
+            workingDirectory = "/Users/example/Development/sample-repo",
+            worktreeRoot = "/Users/example/Development/sample-repo-worktrees/feature-queue-view",
+            repoName = "sample-repo",
+            gitBranch = "feature/queue-view",
             agentName = "amp",
         )
 
         assertEquals("Amp", task.displayAgentLabel)
-        assertEquals("agent-task-queue · sedwards/no-ticket/queue-visibility", task.displayContextLabel)
-        assertEquals("Amp · agent-task-queue · sedwards/no-ticket/queue-visibility", task.displayIdentityLabel)
+        assertEquals("sample-repo · feature/queue-view", task.displayContextLabel)
+        assertEquals("Amp · sample-repo · feature/queue-view", task.displayIdentityLabel)
     }
 
     @Test
@@ -109,8 +109,8 @@ class QueueSnapshotTest {
                     childPid = null,
                     createdAt = null,
                     updatedAt = null,
-                    repoName = "android-register",
-                    gitBranch = "sedwards/no-ticket/real-work",
+                    repoName = "sample-mobile-app",
+                    gitBranch = "feature/real-work",
                     agentName = "amp",
                 )
             ),
@@ -131,7 +131,7 @@ class QueueSnapshotTest {
 
         val identity = snapshot.serverIdentityByPid.getValue(902)
         assertEquals("Amp", identity.primaryLabel)
-        assertEquals("android-register · sedwards/no-ticket/real-work", identity.contextLabel)
+        assertEquals("sample-mobile-app · feature/real-work", identity.contextLabel)
         assertEquals("desktop-sidecar", identity.launchContextLabel)
     }
 
@@ -185,8 +185,8 @@ class QueueSnapshotTest {
                     902 to HistoricalTaskUsage(
                         pid = 902,
                         timestamp = "2026-04-24T11:10:13.561185",
-                        repoName = "android-register",
-                        gitBranch = "sedwards/no-ticket/real-work",
+                        repoName = "sample-mobile-app",
+                        gitBranch = "feature/real-work",
                         agentName = "amp",
                     )
                 )
@@ -194,7 +194,7 @@ class QueueSnapshotTest {
         )
 
         val identity = snapshot.serverIdentityByPid.getValue(902)
-        assertEquals("Amp · android-register · sedwards/no-ticket/real-work", identity.displayLabel)
+        assertEquals("Amp · sample-mobile-app · feature/real-work", identity.displayLabel)
         assertEquals("desktop-sidecar", identity.launchContextLabel)
         assertEquals("idle server", identity.detailLabel)
     }

@@ -107,7 +107,7 @@ class EnvironmentSnapshotTest {
         val process = parseTaskQueueProcesses(
             """
             900 1 amp -m deep
-            901 900 uv run --directory /Users/me/Development/agent-task-queue-worktrees/queue-visibility python task_queue.py --data-dir /tmp/agent-task-queue --queue-capacity=gradle=2
+            901 900 uv run --directory /Users/example/Development/sample-repo-worktrees/feature-queue-view python task_queue.py --data-dir /tmp/agent-task-queue --queue-capacity=gradle=2
             902 901 /Users/me/.venv/bin/python3 task_queue.py --data-dir /tmp/agent-task-queue --queue-capacity=gradle=2
             """.trimIndent()
         ).single()
@@ -115,6 +115,6 @@ class EnvironmentSnapshotTest {
         assertEquals(902, process.pid)
         assertEquals(901, process.parentPid)
         assertEquals("Amp deep", process.agentLabel)
-        assertEquals("queue-visibility", process.contextLabel)
+        assertEquals("feature-queue-view", process.contextLabel)
     }
 }

@@ -24,6 +24,16 @@ import tq
 # Path to tq.py
 TQ_PATH = Path(__file__).parent.parent / "tq.py"
 T = TypeVar("T")
+SAMPLE_AMP_SPACE_CWD = "/Users/example/Development/Repo With Spaces"
+SAMPLE_AMP_APP_CWD = "/Users/example/Development/sample-app"
+SAMPLE_AMP_REPO_CWD = "/Users/example/Development/public-repo"
+SAMPLE_AMP_TOOLING_CWD = "/Users/example/Development/tooling"
+SAMPLE_AMP_SESSION_ID = "session-6"
+SAMPLE_AMP_SESSION_ID_ALT = "session-11"
+SAMPLE_THREAD_ID_1 = "T-00000000-0000-0000-0000-000000000001"
+SAMPLE_THREAD_ID_2 = "T-00000000-0000-0000-0000-000000000002"
+SAMPLE_THREAD_ID_3 = "T-00000000-0000-0000-0000-000000000003"
+SAMPLE_THREAD_ID_4 = "T-00000000-0000-0000-0000-000000000004"
 
 
 @pytest.fixture
@@ -595,19 +605,19 @@ class TestTqHelp:
 class TestAmpRestart:
     def test_extract_env_value_preserves_paths_with_spaces(self):
         process_line = (
-            "86296 amp -m deep PWD=/Users/sedwards/Development/Repo With Spaces "
-            "AGENT_SESSION_ID=20260420_6 SHELL=/bin/zsh"
+            f"86296 amp -m deep PWD={SAMPLE_AMP_SPACE_CWD} "
+            f"AGENT_SESSION_ID={SAMPLE_AMP_SESSION_ID} SHELL=/bin/zsh"
         )
 
-        assert amp_restart._extract_env_value(process_line, "PWD") == "/Users/sedwards/Development/Repo With Spaces"
-        assert amp_restart._extract_env_value(process_line, "AGENT_SESSION_ID") == "20260420_6"
+        assert amp_restart._extract_env_value(process_line, "PWD") == SAMPLE_AMP_SPACE_CWD
+        assert amp_restart._extract_env_value(process_line, "AGENT_SESSION_ID") == SAMPLE_AMP_SESSION_ID
 
     def test_parse_amp_sessions_filters_to_interactive_invocations(self):
-        ps_output = """
-86296 amp -m deep PWD=/Users/sedwards/Development/block-invert-config AGENT_SESSION_ID=20260420_6
-88150 amp threads continue T-019dbffa-53be-708c-b468-b62fff98a27d PWD=/Users/sedwards/Development/agent-task-queue
-90000 amp threads search --json repo:block/agent-task-queue PWD=/tmp
-91000 /Users/sedwards/.amp/bin/amp --mode=smart PWD=/Users/sedwards/Development/agents AGENT_SESSION_ID=20260422_11
+        ps_output = f"""
+86296 amp -m deep PWD={SAMPLE_AMP_APP_CWD} AGENT_SESSION_ID={SAMPLE_AMP_SESSION_ID}
+88150 amp threads continue {SAMPLE_THREAD_ID_1} PWD={SAMPLE_AMP_REPO_CWD}
+90000 amp threads search --json repo:example/public-repo PWD=/tmp
+91000 /Users/example/.amp/bin/amp --mode=smart PWD={SAMPLE_AMP_TOOLING_CWD} AGENT_SESSION_ID={SAMPLE_AMP_SESSION_ID_ALT}
         """
 
         sessions = amp_restart.parse_amp_sessions_from_ps_output(ps_output)
@@ -617,9 +627,9 @@ class TestAmpRestart:
             (88150, None),
             (91000, "smart"),
         ]
-        assert sessions[0].cwd == "/Users/sedwards/Development/block-invert-config"
-        assert sessions[0].agent_session_id == "20260420_6"
-        assert sessions[1].cwd == "/Users/sedwards/Development/agent-task-queue"
+        assert sessions[0].cwd == SAMPLE_AMP_APP_CWD
+        assert sessions[0].agent_session_id == SAMPLE_AMP_SESSION_ID
+        assert sessions[1].cwd == SAMPLE_AMP_REPO_CWD
 
     def test_discover_amp_sessions_falls_back_to_linux_ps_flags(self, monkeypatch, tmp_path):
         cli_log_path = tmp_path / "cli.log"
@@ -632,7 +642,7 @@ class TestAmpRestart:
                 return SimpleNamespace(returncode=1, stdout="", stderr="must set personality to get -x option")
             return SimpleNamespace(
                 returncode=0,
-                stdout="86296 amp -m deep PWD=/tmp AGENT_SESSION_ID=20260420_6\n",
+                stdout=f"86296 amp -m deep PWD=/tmp AGENT_SESSION_ID={SAMPLE_AMP_SESSION_ID}\n",
                 stderr="",
             )
 
@@ -650,29 +660,29 @@ class TestAmpRestart:
                     {
                         "pid": 86296,
                         "timestamp": "2026-04-24T15:00:00.000Z",
-                        "threadId": "T-019dbffa-53be-708c-b468-b62fff98a27d",
+                        "threadId": SAMPLE_THREAD_ID_1,
                     }
                 ),
                 json.dumps(
                     {
                         "pid": 86296,
                         "timestamp": "2026-04-24T15:05:00.000Z",
-                        "message": "[switchToExistingThread] Switching to thread: T-019dc029-f25d-767c-8005-e2996169f6f8",
+                        "message": f"[switchToExistingThread] Switching to thread: {SAMPLE_THREAD_ID_2}",
                     }
                 ),
                 json.dumps(
                     {
                         "pid": 88150,
                         "timestamp": "2026-04-24T15:10:00.000Z",
-                        "newThreadID": "T-019dbfd5-6e1d-7548-b824-f87378e25a8e",
+                        "newThreadID": SAMPLE_THREAD_ID_3,
                     }
                 ),
             ]
         )
 
         assert amp_restart.parse_amp_thread_ids_from_log(log_text, {86296, 88150}) == {
-            86296: "T-019dc029-f25d-767c-8005-e2996169f6f8",
-            88150: "T-019dbfd5-6e1d-7548-b824-f87378e25a8e",
+            86296: SAMPLE_THREAD_ID_2,
+            88150: SAMPLE_THREAD_ID_3,
         }
 
     def test_parse_amp_thread_ids_resets_when_pid_is_reused(self):
@@ -682,7 +692,7 @@ class TestAmpRestart:
                     {
                         "pid": 86296,
                         "timestamp": "2026-04-24T15:05:00.000Z",
-                        "threadId": "T-019dc029-f25d-767c-8005-e2996169f6f8",
+                        "threadId": SAMPLE_THREAD_ID_2,
                     }
                 ),
                 json.dumps(
@@ -690,14 +700,14 @@ class TestAmpRestart:
                         "pid": 86296,
                         "timestamp": "2026-04-24T15:20:00.000Z",
                         "message": "Loaded session state:",
-                        "lastThreadId": "T-019dcf45-5d79-74e8-9ae4-cde26e8f1971",
+                        "lastThreadId": SAMPLE_THREAD_ID_4,
                     }
                 ),
             ]
         )
 
         assert amp_restart.parse_amp_thread_ids_from_log(log_text, {86296}) == {
-            86296: "T-019dcf45-5d79-74e8-9ae4-cde26e8f1971",
+            86296: SAMPLE_THREAD_ID_4,
         }
 
     def test_amp_restart_shell_output_for_targeted_pids(self, monkeypatch, capsys):
@@ -707,15 +717,15 @@ class TestAmpRestart:
             lambda: [
                 amp_restart.AmpSession(
                     pid=86296,
-                    cwd="/Users/sedwards/Development/block-invert-config",
-                    thread_id="T-019dc029-f25d-767c-8005-e2996169f6f8",
-                    agent_session_id="20260420_6",
+                    cwd=SAMPLE_AMP_APP_CWD,
+                    thread_id=SAMPLE_THREAD_ID_2,
+                    agent_session_id=SAMPLE_AMP_SESSION_ID,
                     mode="deep",
                 ),
                 amp_restart.AmpSession(
                     pid=88150,
-                    cwd="/Users/sedwards/Development/agent-task-queue",
-                    thread_id="T-019dbffa-53be-708c-b468-b62fff98a27d",
+                    cwd=SAMPLE_AMP_REPO_CWD,
+                    thread_id=SAMPLE_THREAD_ID_1,
                     mode="deep",
                 ),
             ],
@@ -728,7 +738,7 @@ class TestAmpRestart:
         captured = capsys.readouterr()
         assert exit_code == 0
         assert "kill -TERM 86296" in captured.out
-        assert "amp threads continue T-019dc029-f25d-767c-8005-e2996169f6f8" in captured.out
+        assert f"amp threads continue {SAMPLE_THREAD_ID_2}" in captured.out
         assert "88150" not in captured.out
 
     def test_amp_restart_json_fails_for_unresolved_targeted_pid(self, monkeypatch, capsys):
@@ -738,9 +748,9 @@ class TestAmpRestart:
             lambda: [
                 amp_restart.AmpSession(
                     pid=86296,
-                    cwd="/Users/sedwards/Development/block-invert-config",
+                    cwd=SAMPLE_AMP_APP_CWD,
                     thread_id=None,
-                    agent_session_id="20260420_6",
+                    agent_session_id=SAMPLE_AMP_SESSION_ID,
                     mode="deep",
                 )
             ],
