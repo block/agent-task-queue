@@ -160,6 +160,19 @@ def log_metric(event: str, **kwargs):
     _log_metric(PATHS.metrics_path, event, MAX_METRICS_SIZE_MB, **kwargs)
 
 
+def _current_context():
+    """Best-effort FastMCP request context; unavailable in tests and background codepaths."""
+    try:
+        return get_context()
+    except LookupError:
+        return None
+
+
+def _current_client_id() -> str | None:
+    ctx = _current_context()
+    return ctx.client_id if ctx and ctx.client_id else None
+
+
 def cleanup_queue(conn, queue_name: str, queue_capacities: dict[str, int] | None = None):
     """Clean up queue using configured paths and detect orphaned tasks."""
     if queue_capacities is None:
@@ -290,11 +303,7 @@ async def wait_for_turn(
         cleanup_queue(conn, queue_name, QUEUE_CAPACITIES)
 
     my_pid = os.getpid()
-    ctx = None
-    try:
-        ctx = get_context()
-    except LookupError:
-        pass  # Running outside request context (e.g., in tests)
+    ctx = _current_context()
 
     with get_db() as conn:
         task_id = insert_waiting_task(
@@ -395,11 +404,7 @@ async def release_lock(task_id: int):
     with _active_task_ids_lock:
         _active_task_ids.discard(task_id)
 
-    ctx = None
-    try:
-        ctx = get_context()
-    except LookupError:
-        pass
+    ctx = _current_context()
 
     try:
         with get_db() as conn:
@@ -504,13 +509,7 @@ async def run_task(
                 key, value = pair.split("=", 1)
                 env[key.strip()] = value.strip()
 
-    ctx = None
-    try:
-        ctx = get_context()
-    except LookupError:
-        pass
-
-    caller_name = agent_name.strip() or (ctx.client_id if ctx and ctx.client_id else None)
+    caller_name = agent_name.strip() or _current_client_id()
     task_origin = collect_task_origin(working_directory, caller_name)
 
     task_id = await wait_for_turn(queue_name, command, task_origin=task_origin)

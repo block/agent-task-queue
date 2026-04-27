@@ -211,7 +211,7 @@ def collect_task_origin(working_directory: str, agent_name: str | None = None) -
         worktree_root=worktree_root,
         repo_name=repo_name,
         git_branch=git_branch,
-        agent_name=agent_name or None,
+        agent_name=agent_name,
     )
 
 
@@ -233,7 +233,12 @@ def _git_context(working_directory: str) -> tuple[str | None, str | None, str | 
             text=True,
             timeout=GIT_METADATA_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (
+        FileNotFoundError,
+        NotADirectoryError,
+        PermissionError,
+        subprocess.SubprocessError,
+    ):
         return None, None, None
 
     if result.returncode != 0:

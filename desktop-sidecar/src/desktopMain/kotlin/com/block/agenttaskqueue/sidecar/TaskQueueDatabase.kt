@@ -77,13 +77,23 @@ object TaskQueueDatabase {
 }
 
 private fun ResultSet.getNullableInt(columnName: String): Int? {
-    val value = getObject(columnName) ?: return null
-    return when (value) {
-        is Int -> value
-        is Long -> value.toInt()
-        is Number -> value.toInt()
-        else -> value.toString().toIntOrNull()
+    return coerceNullableInt(getObject(columnName))
+}
+
+internal fun coerceNullableInt(value: Any?): Int? {
+    val longValue = when (value) {
+        null -> return null
+        is Int -> return value
+        is Long -> value
+        is Short -> value.toLong()
+        is Byte -> value.toLong()
+        is Number -> value.toLong()
+        else -> value.toString().toLongOrNull() ?: return null
     }
+
+    return longValue
+        .takeIf { it in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() }
+        ?.toInt()
 }
 
 private fun ResultSet.columnNames(): Set<String> {

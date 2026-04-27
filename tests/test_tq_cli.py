@@ -4,6 +4,7 @@ Tests the command-line interface for running tasks and inspecting the queue.
 """
 
 import argparse
+import amp_restart
 import json
 import os
 import signal
@@ -598,8 +599,8 @@ class TestAmpRestart:
             "AGENT_SESSION_ID=20260420_6 SHELL=/bin/zsh"
         )
 
-        assert tq._extract_env_value(process_line, "PWD") == "/Users/sedwards/Development/Repo With Spaces"
-        assert tq._extract_env_value(process_line, "AGENT_SESSION_ID") == "20260420_6"
+        assert amp_restart._extract_env_value(process_line, "PWD") == "/Users/sedwards/Development/Repo With Spaces"
+        assert amp_restart._extract_env_value(process_line, "AGENT_SESSION_ID") == "20260420_6"
 
     def test_parse_amp_sessions_filters_to_interactive_invocations(self):
         ps_output = """
@@ -609,7 +610,7 @@ class TestAmpRestart:
 91000 /Users/sedwards/.amp/bin/amp --mode=smart PWD=/Users/sedwards/Development/agents AGENT_SESSION_ID=20260422_11
         """
 
-        sessions = tq.parse_amp_sessions_from_ps_output(ps_output)
+        sessions = amp_restart.parse_amp_sessions_from_ps_output(ps_output)
 
         assert [(session.pid, session.mode) for session in sessions] == [
             (86296, "deep"),
@@ -627,7 +628,7 @@ class TestAmpRestart:
 
         def fake_run(command, capture_output, text, timeout):
             calls.append(command)
-            if command == tq.AMP_PS_COMMAND_CANDIDATES[0]:
+            if command == amp_restart.AMP_PS_COMMAND_CANDIDATES[0]:
                 return SimpleNamespace(returncode=1, stdout="", stderr="must set personality to get -x option")
             return SimpleNamespace(
                 returncode=0,
@@ -635,12 +636,12 @@ class TestAmpRestart:
                 stderr="",
             )
 
-        monkeypatch.setattr(tq.subprocess, "run", fake_run)
+        monkeypatch.setattr(amp_restart.subprocess, "run", fake_run)
 
-        sessions = tq.discover_amp_sessions(cli_log_path=cli_log_path)
+        sessions = amp_restart.discover_amp_sessions(cli_log_path=cli_log_path)
 
         assert [session.pid for session in sessions] == [86296]
-        assert calls == tq.AMP_PS_COMMAND_CANDIDATES[:2]
+        assert calls == amp_restart.AMP_PS_COMMAND_CANDIDATES[:2]
 
     def test_parse_amp_thread_ids_uses_latest_entry_per_pid(self):
         log_text = "\n".join(
@@ -669,7 +670,7 @@ class TestAmpRestart:
             ]
         )
 
-        assert tq.parse_amp_thread_ids_from_log(log_text, {86296, 88150}) == {
+        assert amp_restart.parse_amp_thread_ids_from_log(log_text, {86296, 88150}) == {
             86296: "T-019dc029-f25d-767c-8005-e2996169f6f8",
             88150: "T-019dbfd5-6e1d-7548-b824-f87378e25a8e",
         }
@@ -695,23 +696,23 @@ class TestAmpRestart:
             ]
         )
 
-        assert tq.parse_amp_thread_ids_from_log(log_text, {86296}) == {
+        assert amp_restart.parse_amp_thread_ids_from_log(log_text, {86296}) == {
             86296: "T-019dcf45-5d79-74e8-9ae4-cde26e8f1971",
         }
 
     def test_amp_restart_shell_output_for_targeted_pids(self, monkeypatch, capsys):
         monkeypatch.setattr(
-            tq,
+            amp_restart,
             "discover_amp_sessions",
             lambda: [
-                tq.AmpSession(
+                amp_restart.AmpSession(
                     pid=86296,
                     cwd="/Users/sedwards/Development/block-invert-config",
                     thread_id="T-019dc029-f25d-767c-8005-e2996169f6f8",
                     agent_session_id="20260420_6",
                     mode="deep",
                 ),
-                tq.AmpSession(
+                amp_restart.AmpSession(
                     pid=88150,
                     cwd="/Users/sedwards/Development/agent-task-queue",
                     thread_id="T-019dbffa-53be-708c-b468-b62fff98a27d",
@@ -720,7 +721,7 @@ class TestAmpRestart:
             ],
         )
 
-        exit_code = tq.cmd_amp_restart(
+        exit_code = amp_restart.cmd_amp_restart(
             argparse.Namespace(pid=[86296], json=False, shell=True)
         )
 
@@ -732,10 +733,10 @@ class TestAmpRestart:
 
     def test_amp_restart_json_fails_for_unresolved_targeted_pid(self, monkeypatch, capsys):
         monkeypatch.setattr(
-            tq,
+            amp_restart,
             "discover_amp_sessions",
             lambda: [
-                tq.AmpSession(
+                amp_restart.AmpSession(
                     pid=86296,
                     cwd="/Users/sedwards/Development/block-invert-config",
                     thread_id=None,
@@ -745,7 +746,7 @@ class TestAmpRestart:
             ],
         )
 
-        exit_code = tq.cmd_amp_restart(
+        exit_code = amp_restart.cmd_amp_restart(
             argparse.Namespace(pid=[86296], json=True, shell=False)
         )
 
