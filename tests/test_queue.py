@@ -10,6 +10,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 # Set fast polling intervals for tests BEFORE importing task_queue
 os.environ["TASK_QUEUE_POLL_WAITING"] = "0.1"
@@ -106,6 +107,37 @@ def create_git_repo(tmp_path: Path, name: str) -> Path:
         capture_output=True,
     )
     return repo_dir
+
+
+def test_git_context_uses_commit_hash_for_detached_head(monkeypatch):
+    calls = []
+
+    def fake_run(command, capture_output, text, timeout):
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=0,
+            stdout="/tmp/repo\n/tmp/repo/.git\n0123456789abcdef0123456789abcdef01234567\nHEAD\n",
+        )
+
+    monkeypatch.setattr(queue_core.subprocess, "run", fake_run)
+    monkeypatch.setattr(queue_core, "_git_repo_name_from_common_dir", lambda *_: "sample-repo")
+
+    assert queue_core._git_context("/tmp/repo") == (
+        "/tmp/repo",
+        "sample-repo",
+        "0123456",
+    )
+    assert calls == [[
+        "git",
+        "-C",
+        "/tmp/repo",
+        "rev-parse",
+        "--show-toplevel",
+        "--git-common-dir",
+        "HEAD",
+        "--symbolic-full-name",
+        "HEAD",
+    ]]
 
 
 @pytest.mark.asyncio

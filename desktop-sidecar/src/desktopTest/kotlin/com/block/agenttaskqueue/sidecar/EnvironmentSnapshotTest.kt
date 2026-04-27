@@ -8,6 +8,40 @@ import kotlin.test.assertTrue
 
 class EnvironmentSnapshotTest {
     @Test
+    fun commandRunnerFallsBackToLinuxPsFlags() {
+        val attemptedCommands = mutableListOf<List<String>>()
+        val result = runCommandCandidates(
+            listOf(
+                listOf("ps", "eww", "-axo", "pid=,ppid=,command="),
+                listOf("ps", "eww", "axo", "pid=,ppid=,command="),
+            )
+        ) { command ->
+            attemptedCommands += command
+            when (command) {
+                listOf("ps", "eww", "-axo", "pid=,ppid=,command=") -> CommandResult(
+                    output = "must set personality to get -x option",
+                    exitCode = 1,
+                )
+                listOf("ps", "eww", "axo", "pid=,ppid=,command=") -> CommandResult(
+                    output = "902 1 python task_queue.py",
+                    exitCode = 0,
+                )
+                else -> error("Unexpected command: $command")
+            }
+        }
+
+        assertEquals(
+            listOf(
+                listOf("ps", "eww", "-axo", "pid=,ppid=,command="),
+                listOf("ps", "eww", "axo", "pid=,ppid=,command="),
+            ),
+            attemptedCommands,
+        )
+        assertEquals(0, result.exitCode)
+        assertEquals("902 1 python task_queue.py", result.output)
+    }
+
+    @Test
     fun commandRunnerDrainsLargeStdoutWithoutTimingOut() {
         val result = runCommand(
             "python3",

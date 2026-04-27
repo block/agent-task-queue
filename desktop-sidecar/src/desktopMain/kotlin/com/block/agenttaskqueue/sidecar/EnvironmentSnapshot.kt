@@ -92,7 +92,12 @@ data class AdbDevice(
 object TaskQueueProcessInspector {
     fun loadConfiguration(dataDir: Path): QueueConfigurationSnapshot {
         val normalizedDataDir = dataDir.toAbsolutePath().normalize()
-        val commandResult = runCommand("ps", "eww", "-axo", "pid=,ppid=,command=")
+        val commandResult = runCommandCandidates(
+            listOf(
+                listOf("ps", "eww", "-axo", "pid=,ppid=,command="),
+                listOf("ps", "eww", "axo", "pid=,ppid=,command="),
+            )
+        )
 
         if (commandResult.errorMessage != null) {
             return QueueConfigurationSnapshot(
@@ -517,6 +522,21 @@ internal fun runCommand(vararg command: String): CommandResult {
     } finally {
         outputReader.shutdownNow()
     }
+}
+
+internal fun runCommandCandidates(
+    candidates: List<List<String>>,
+    runner: (List<String>) -> CommandResult = { runCommand(*it.toTypedArray()) },
+): CommandResult {
+    var lastResult = CommandResult(output = "", exitCode = -1, errorMessage = "No command candidates provided.")
+    candidates.forEach { command ->
+        val result = runner(command)
+        if (result.errorMessage == null && result.exitCode == 0) {
+            return result
+        }
+        lastResult = result
+    }
+    return lastResult
 }
 
 private fun shellSplit(commandLine: String): List<String> {
