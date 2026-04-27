@@ -3,8 +3,6 @@ Test suite for the tq CLI tool.
 Tests the command-line interface for running tasks and inspecting the queue.
 """
 
-import argparse
-import amp_restart
 import json
 import os
 import signal
@@ -15,7 +13,6 @@ import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TypeVar
 
 import pytest
@@ -24,16 +21,6 @@ import tq
 # Path to tq.py
 TQ_PATH = Path(__file__).parent.parent / "tq.py"
 T = TypeVar("T")
-SAMPLE_AMP_SPACE_CWD = "/Users/example/Development/Repo With Spaces"
-SAMPLE_AMP_APP_CWD = "/Users/example/Development/sample-app"
-SAMPLE_AMP_REPO_CWD = "/Users/example/Development/public-repo"
-SAMPLE_AMP_TOOLING_CWD = "/Users/example/Development/tooling"
-SAMPLE_AMP_SESSION_ID = "session-6"
-SAMPLE_AMP_SESSION_ID_ALT = "session-11"
-SAMPLE_THREAD_ID_1 = "T-00000000-0000-0000-0000-000000000001"
-SAMPLE_THREAD_ID_2 = "T-00000000-0000-0000-0000-000000000002"
-SAMPLE_THREAD_ID_3 = "T-00000000-0000-0000-0000-000000000003"
-SAMPLE_THREAD_ID_4 = "T-00000000-0000-0000-0000-000000000004"
 
 
 @pytest.fixture
@@ -600,171 +587,6 @@ class TestTqHelp:
         assert "--queue" in result.stdout
         assert "--timeout" in result.stdout
         assert "--dir" in result.stdout
-
-
-class TestAmpRestart:
-    def test_extract_env_value_preserves_paths_with_spaces(self):
-        process_line = (
-            f"86296 amp -m deep PWD={SAMPLE_AMP_SPACE_CWD} "
-            f"AGENT_SESSION_ID={SAMPLE_AMP_SESSION_ID} SHELL=/bin/zsh"
-        )
-
-        assert amp_restart._extract_env_value(process_line, "PWD") == SAMPLE_AMP_SPACE_CWD
-        assert amp_restart._extract_env_value(process_line, "AGENT_SESSION_ID") == SAMPLE_AMP_SESSION_ID
-
-    def test_parse_amp_sessions_filters_to_interactive_invocations(self):
-        ps_output = f"""
-86296 amp -m deep PWD={SAMPLE_AMP_APP_CWD} AGENT_SESSION_ID={SAMPLE_AMP_SESSION_ID}
-88150 amp threads continue {SAMPLE_THREAD_ID_1} PWD={SAMPLE_AMP_REPO_CWD}
-90000 amp threads search --json repo:example/public-repo PWD=/tmp
-91000 /Users/example/.amp/bin/amp --mode=smart PWD={SAMPLE_AMP_TOOLING_CWD} AGENT_SESSION_ID={SAMPLE_AMP_SESSION_ID_ALT}
-        """
-
-        sessions = amp_restart.parse_amp_sessions_from_ps_output(ps_output)
-
-        assert [(session.pid, session.mode) for session in sessions] == [
-            (86296, "deep"),
-            (88150, None),
-            (91000, "smart"),
-        ]
-        assert sessions[0].cwd == SAMPLE_AMP_APP_CWD
-        assert sessions[0].agent_session_id == SAMPLE_AMP_SESSION_ID
-        assert sessions[1].cwd == SAMPLE_AMP_REPO_CWD
-
-    def test_discover_amp_sessions_falls_back_to_linux_ps_flags(self, monkeypatch, tmp_path):
-        cli_log_path = tmp_path / "cli.log"
-        cli_log_path.write_text("")
-        calls = []
-
-        def fake_run(command, capture_output, text, timeout):
-            calls.append(command)
-            if command == amp_restart.AMP_PS_COMMAND_CANDIDATES[0]:
-                return SimpleNamespace(returncode=1, stdout="", stderr="must set personality to get -x option")
-            return SimpleNamespace(
-                returncode=0,
-                stdout=f"86296 amp -m deep PWD=/tmp AGENT_SESSION_ID={SAMPLE_AMP_SESSION_ID}\n",
-                stderr="",
-            )
-
-        monkeypatch.setattr(amp_restart.subprocess, "run", fake_run)
-
-        sessions = amp_restart.discover_amp_sessions(cli_log_path=cli_log_path)
-
-        assert [session.pid for session in sessions] == [86296]
-        assert calls == amp_restart.AMP_PS_COMMAND_CANDIDATES[:2]
-
-    def test_parse_amp_thread_ids_uses_latest_entry_per_pid(self):
-        log_text = "\n".join(
-            [
-                json.dumps(
-                    {
-                        "pid": 86296,
-                        "timestamp": "2026-04-24T15:00:00.000Z",
-                        "threadId": SAMPLE_THREAD_ID_1,
-                    }
-                ),
-                json.dumps(
-                    {
-                        "pid": 86296,
-                        "timestamp": "2026-04-24T15:05:00.000Z",
-                        "message": f"[switchToExistingThread] Switching to thread: {SAMPLE_THREAD_ID_2}",
-                    }
-                ),
-                json.dumps(
-                    {
-                        "pid": 88150,
-                        "timestamp": "2026-04-24T15:10:00.000Z",
-                        "newThreadID": SAMPLE_THREAD_ID_3,
-                    }
-                ),
-            ]
-        )
-
-        assert amp_restart.parse_amp_thread_ids_from_log(log_text, {86296, 88150}) == {
-            86296: SAMPLE_THREAD_ID_2,
-            88150: SAMPLE_THREAD_ID_3,
-        }
-
-    def test_parse_amp_thread_ids_resets_when_pid_is_reused(self):
-        log_text = "\n".join(
-            [
-                json.dumps(
-                    {
-                        "pid": 86296,
-                        "timestamp": "2026-04-24T15:05:00.000Z",
-                        "threadId": SAMPLE_THREAD_ID_2,
-                    }
-                ),
-                json.dumps(
-                    {
-                        "pid": 86296,
-                        "timestamp": "2026-04-24T15:20:00.000Z",
-                        "message": "Loaded session state:",
-                        "lastThreadId": SAMPLE_THREAD_ID_4,
-                    }
-                ),
-            ]
-        )
-
-        assert amp_restart.parse_amp_thread_ids_from_log(log_text, {86296}) == {
-            86296: SAMPLE_THREAD_ID_4,
-        }
-
-    def test_amp_restart_shell_output_for_targeted_pids(self, monkeypatch, capsys):
-        monkeypatch.setattr(
-            amp_restart,
-            "discover_amp_sessions",
-            lambda: [
-                amp_restart.AmpSession(
-                    pid=86296,
-                    cwd=SAMPLE_AMP_APP_CWD,
-                    thread_id=SAMPLE_THREAD_ID_2,
-                    agent_session_id=SAMPLE_AMP_SESSION_ID,
-                    mode="deep",
-                ),
-                amp_restart.AmpSession(
-                    pid=88150,
-                    cwd=SAMPLE_AMP_REPO_CWD,
-                    thread_id=SAMPLE_THREAD_ID_1,
-                    mode="deep",
-                ),
-            ],
-        )
-
-        exit_code = amp_restart.cmd_amp_restart(
-            argparse.Namespace(pid=[86296], json=False, shell=True)
-        )
-
-        captured = capsys.readouterr()
-        assert exit_code == 0
-        assert "kill -TERM 86296" in captured.out
-        assert f"amp threads continue {SAMPLE_THREAD_ID_2}" in captured.out
-        assert "88150" not in captured.out
-
-    def test_amp_restart_json_fails_for_unresolved_targeted_pid(self, monkeypatch, capsys):
-        monkeypatch.setattr(
-            amp_restart,
-            "discover_amp_sessions",
-            lambda: [
-                amp_restart.AmpSession(
-                    pid=86296,
-                    cwd=SAMPLE_AMP_APP_CWD,
-                    thread_id=None,
-                    agent_session_id=SAMPLE_AMP_SESSION_ID,
-                    mode="deep",
-                )
-            ],
-        )
-
-        exit_code = amp_restart.cmd_amp_restart(
-            argparse.Namespace(pid=[86296], json=True, shell=False)
-        )
-
-        captured = capsys.readouterr()
-        payload = json.loads(captured.out)
-        assert exit_code == 1
-        assert payload["summary"] == {"total": 1, "resolved": 0, "unresolved": 1}
-        assert payload["sessions"][0]["thread_id"] is None
 
 
 class TestQueueIntegration:

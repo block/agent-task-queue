@@ -6,7 +6,6 @@ CLI to inspect and run commands through the Agent Task Queue.
 """
 
 import argparse
-import amp_restart
 import json
 import os
 import shlex
@@ -613,11 +612,9 @@ def main():
     logs_parser.add_argument("-n", type=int, default=20, help="Number of entries (default: 20)")
     logs_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
-    amp_restart.add_amp_restart_subparser(subparsers)
-
     # Handle implicit run: tq ./gradlew build -> tq run ./gradlew build
     # Pre-process argv to insert 'run' if needed
-    known_subcommands = {"run", "list", "clear", "logs", "amp-restart"}
+    known_subcommands = {"run", "list", "clear", "logs"}
     args_list = sys.argv[1:]
 
     # Find the first non-option argument (skip --data-dir and its value)
@@ -653,8 +650,6 @@ def main():
         cmd_clear(args)
     elif args.command == "logs":
         cmd_logs(args)
-    elif args.command == "amp-restart":
-        sys.exit(amp_restart.cmd_amp_restart(args))
     else:
         parser.print_help()
 
