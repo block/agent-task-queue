@@ -2,8 +2,12 @@ package com.block.agenttaskqueue.sidecar
 
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.util.concurrent.TimeUnit
 
 private val DEFAULT_QUEUE_DATA_DIR: Path = Paths.get("/tmp/agent-task-queue").toAbsolutePath().normalize()
+private const val COMMAND_TIMEOUT_SECONDS = 5L
+private val EMULATOR_SERIAL_PATTERN = Regex("^(?:emu|emulator)-(\\d+)$", RegexOption.IGNORE_CASE)
+private val LOCALHOST_EMULATOR_PATTERN = Regex("^(?:127\\.0\\.0\\.1|localhost):(\\d+)$", RegexOption.IGNORE_CASE)
 
 data class QueueConfigurationSnapshot(
     val serverProcesses: List<QueueServerProcess>,
@@ -234,13 +238,10 @@ internal fun parseAdbSnapshot(output: String): AdbSnapshot {
 
 internal fun extractEmulatorPort(value: String): String? {
     val trimmed = value.trim()
-    Regex("^(?:emu|emulator)-(\\d+)$", RegexOption.IGNORE_CASE).matchEntire(trimmed)?.let {
+    EMULATOR_SERIAL_PATTERN.matchEntire(trimmed)?.let {
         return it.groupValues[1]
     }
-    Regex("^emulator-(\\d+)$", RegexOption.IGNORE_CASE).matchEntire(trimmed)?.let {
-        return it.groupValues[1]
-    }
-    Regex("^(?:127\\.0\\.0\\.1|localhost):(\\d+)$", RegexOption.IGNORE_CASE).matchEntire(trimmed)?.let {
+    LOCALHOST_EMULATOR_PATTERN.matchEntire(trimmed)?.let {
         return it.groupValues[1]
     }
     return null
@@ -459,8 +460,18 @@ private fun runCommand(vararg command: String): CommandResult {
         val process = ProcessBuilder(*command)
             .redirectErrorStream(true)
             .start()
+        if (!process.waitFor(COMMAND_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+            process.waitFor()
+            return CommandResult(
+                output = "",
+                exitCode = -1,
+                errorMessage = "`${command.joinToString(" ")}` timed out after ${COMMAND_TIMEOUT_SECONDS}s.",
+            )
+        }
+
         val output = process.inputStream.bufferedReader().use { it.readText() }
-        CommandResult(output = output.trim(), exitCode = process.waitFor())
+        CommandResult(output = output.trim(), exitCode = process.exitValue())
     } catch (error: Exception) {
         CommandResult(
             output = "",
