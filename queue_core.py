@@ -11,6 +11,7 @@ import os
 import signal
 import shlex
 import sqlite3
+import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -23,6 +24,7 @@ POLL_INTERVAL_WAITING = float(os.environ.get("TASK_QUEUE_POLL_WAITING", "1"))
 DEFAULT_MAX_LOCK_AGE_MINUTES = 120
 DEFAULT_MAX_METRICS_SIZE_MB = 5
 QUEUE_SCOPE_SEPARATOR = "/"
+GIT_METADATA_TIMEOUT_SECONDS = 2
 
 
 @dataclass
@@ -44,6 +46,65 @@ class QueuePaths:
         )
 
 
+@dataclass(frozen=True)
+class TaskOrigin:
+    """Optional metadata about where a queued task came from."""
+
+    working_directory: str
+    worktree_root: str | None = None
+    repo_name: str | None = None
+    git_branch: str | None = None
+    agent_name: str | None = None
+
+
+def task_origin_kwargs(task_origin: "TaskOrigin | None") -> dict[str, str]:
+    """Return non-empty task origin fields as kwargs suitable for DB/metrics inserts."""
+    if task_origin is None:
+        return {}
+
+    return {
+        key: value
+        for key, value in {
+            "working_directory": task_origin.working_directory,
+            "worktree_root": task_origin.worktree_root,
+            "repo_name": task_origin.repo_name,
+            "git_branch": task_origin.git_branch,
+            "agent_name": task_origin.agent_name,
+        }.items()
+        if value
+    }
+
+
+def insert_waiting_task(
+    conn,
+    queue_name: str,
+    pid: int,
+    server_id: str,
+    command: str | None = None,
+    task_origin: "TaskOrigin | None" = None,
+) -> int:
+    """Insert a waiting task row and return its task ID."""
+    cursor = conn.execute(
+        """INSERT INTO queue (
+               queue_name, status, pid, server_id, command,
+               working_directory, worktree_root, repo_name, git_branch, agent_name
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            queue_name,
+            "waiting",
+            pid,
+            server_id,
+            command,
+            task_origin.working_directory if task_origin else None,
+            task_origin.worktree_root if task_origin else None,
+            task_origin.repo_name if task_origin else None,
+            task_origin.git_branch if task_origin else None,
+            task_origin.agent_name if task_origin else None,
+        ),
+    )
+    return cursor.lastrowid
+
+
 # --- Database Schema ---
 QUEUE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS queue (
@@ -54,6 +115,11 @@ CREATE TABLE IF NOT EXISTS queue (
     server_id TEXT,
     child_pid INTEGER,
     command TEXT,
+    working_directory TEXT,
+    worktree_root TEXT,
+    repo_name TEXT,
+    git_branch TEXT,
+    agent_name TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
@@ -67,6 +133,26 @@ ALTER TABLE queue ADD COLUMN server_id TEXT
 # Migration to add command column to existing databases
 QUEUE_MIGRATION_COMMAND = """
 ALTER TABLE queue ADD COLUMN command TEXT
+"""
+
+QUEUE_MIGRATION_WORKING_DIRECTORY = """
+ALTER TABLE queue ADD COLUMN working_directory TEXT
+"""
+
+QUEUE_MIGRATION_WORKTREE_ROOT = """
+ALTER TABLE queue ADD COLUMN worktree_root TEXT
+"""
+
+QUEUE_MIGRATION_REPO_NAME = """
+ALTER TABLE queue ADD COLUMN repo_name TEXT
+"""
+
+QUEUE_MIGRATION_GIT_BRANCH = """
+ALTER TABLE queue ADD COLUMN git_branch TEXT
+"""
+
+QUEUE_MIGRATION_AGENT_NAME = """
+ALTER TABLE queue ADD COLUMN agent_name TEXT
 """
 
 QUEUE_INDEX = """
@@ -99,11 +185,99 @@ def init_db(paths: QueuePaths):
         conn.execute(QUEUE_SCHEMA)
         conn.execute(QUEUE_INDEX)
         # Run migrations for existing databases
-        for migration in [QUEUE_MIGRATION_SERVER_ID, QUEUE_MIGRATION_COMMAND]:
+        for migration in [
+            QUEUE_MIGRATION_SERVER_ID,
+            QUEUE_MIGRATION_COMMAND,
+            QUEUE_MIGRATION_WORKING_DIRECTORY,
+            QUEUE_MIGRATION_WORKTREE_ROOT,
+            QUEUE_MIGRATION_REPO_NAME,
+            QUEUE_MIGRATION_GIT_BRANCH,
+            QUEUE_MIGRATION_AGENT_NAME,
+        ]:
             try:
                 conn.execute(migration)
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+
+
+def collect_task_origin(working_directory: str, agent_name: str | None = None) -> TaskOrigin:
+    """Capture stable repo/worktree metadata for a queued task."""
+    resolved_working_directory = str(Path(working_directory).resolve())
+    worktree_root, repo_name, git_branch = _git_context(resolved_working_directory)
+
+    return TaskOrigin(
+        working_directory=resolved_working_directory,
+        worktree_root=worktree_root,
+        repo_name=repo_name,
+        git_branch=git_branch,
+        agent_name=agent_name,
+    )
+
+
+def _git_context(working_directory: str) -> tuple[str | None, str | None, str | None]:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                working_directory,
+                "rev-parse",
+                "--show-toplevel",
+                "--git-common-dir",
+                "HEAD",
+                "--symbolic-full-name",
+                "HEAD",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=GIT_METADATA_TIMEOUT_SECONDS,
+        )
+    except (
+        FileNotFoundError,
+        NotADirectoryError,
+        PermissionError,
+        subprocess.SubprocessError,
+    ):
+        return None, None, None
+
+    if result.returncode != 0:
+        return None, None, None
+
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) < 4:
+        return None, None, None
+
+    worktree_root, git_common_dir, head_oid, head_ref = lines[:4]
+    repo_name = _git_repo_name_from_common_dir(
+        working_directory,
+        worktree_root,
+        git_common_dir,
+    )
+    git_branch = (
+        head_ref.removeprefix("refs/heads/")
+        if head_ref.startswith("refs/heads/")
+        else head_oid[:7] or None
+    )
+    return worktree_root or None, repo_name, git_branch
+
+
+def _git_repo_name_from_common_dir(
+    working_directory: str,
+    worktree_root: str | None,
+    git_common_dir: str,
+) -> str | None:
+    common_dir_path = Path(git_common_dir)
+    if not common_dir_path.is_absolute():
+        common_dir_path = (Path(working_directory) / common_dir_path).resolve()
+
+    if common_dir_path.name == ".git":
+        return common_dir_path.parent.name or None
+
+    if worktree_root:
+        return Path(worktree_root).name
+
+    return None
 
 
 def normalize_queue_name(queue_name: str) -> str:

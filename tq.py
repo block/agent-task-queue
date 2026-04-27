@@ -21,6 +21,8 @@ from pathlib import Path
 # Import shared queue infrastructure
 from queue_core import (
     QueuePaths,
+    TaskOrigin,
+    collect_task_origin,
     get_db,
     init_db,
     ensure_db,
@@ -30,9 +32,11 @@ from queue_core import (
     release_lock,
     is_process_alive,
     kill_process_tree,
+    insert_waiting_task,
     normalize_queue_name,
     parse_queue_capacities,
     attempt_task_start,
+    task_origin_kwargs,
     POLL_INTERVAL_WAITING,
     DEFAULT_MAX_LOCK_AGE_MINUTES,
     DEFAULT_MAX_METRICS_SIZE_MB,
@@ -297,23 +301,46 @@ def cleanup_queue(
         conn.commit()
 
 
-def register_task(conn, queue_name: str, paths: QueuePaths, command: str = None) -> int:
+def register_task(
+    conn,
+    queue_name: str,
+    paths: QueuePaths,
+    command: str = None,
+    task_origin: TaskOrigin | None = None,
+) -> int:
     """Register a task in the queue. Returns task_id immediately."""
     my_pid = os.getpid()
 
-    cursor = conn.execute(
-        "INSERT INTO queue (queue_name, status, pid, server_id, command) VALUES (?, ?, ?, ?, ?)",
-        (queue_name, "waiting", my_pid, CLI_INSTANCE_ID, command),
+    task_id = insert_waiting_task(
+        conn,
+        queue_name,
+        my_pid,
+        CLI_INSTANCE_ID,
+        command=command,
+        task_origin=task_origin,
     )
     conn.commit()
-    task_id = cursor.lastrowid
 
-    log_metric(paths, "task_queued", task_id=task_id, queue_name=queue_name, pid=my_pid)
+    log_metric(
+        paths,
+        "task_queued",
+        task_id=task_id,
+        queue_name=queue_name,
+        pid=my_pid,
+        **task_origin_kwargs(task_origin),
+    )
     print(f"[tq] Task #{task_id} queued in '{queue_name}'")
     return task_id
 
 
-def wait_for_turn(conn, queue_name: str, task_id: int, paths: QueuePaths, queue_capacities: dict[str, int]) -> None:
+def wait_for_turn(
+    conn,
+    queue_name: str,
+    task_id: int,
+    paths: QueuePaths,
+    queue_capacities: dict[str, int],
+    task_origin: TaskOrigin | None = None,
+) -> None:
     """Wait for the task's turn to run. Task must already be registered."""
     my_pid = os.getpid()
     queued_at = time.time()
@@ -347,7 +374,9 @@ def wait_for_turn(conn, queue_name: str, task_id: int, paths: QueuePaths, queue_
                 "task_started",
                 task_id=task_id,
                 queue_name=queue_name,
+                pid=my_pid,
                 wait_time_seconds=round(wait_time, 2),
+                **task_origin_kwargs(task_origin),
             )
             if wait_time > 1:
                 print(f"[tq] Lock acquired after {wait_time:.1f}s wait")
@@ -385,6 +414,7 @@ def cmd_run(args):
 
     paths = get_paths(args)
     paths.data_dir.mkdir(parents=True, exist_ok=True)
+    task_origin = collect_task_origin(working_dir)
 
     # Ensure database exists and is valid (recover if corrupted)
     ensure_db(paths)
@@ -441,8 +471,8 @@ def cmd_run(args):
         cleanup_queue(conn, queue_name, paths, queue_capacities)
 
         # Register task first so task_id is available for cleanup if interrupted
-        task_id = register_task(conn, queue_name, paths, command=command)
-        wait_for_turn(conn, queue_name, task_id, paths, queue_capacities)
+        task_id = register_task(conn, queue_name, paths, command=command, task_origin=task_origin)
+        wait_for_turn(conn, queue_name, task_id, paths, queue_capacities, task_origin=task_origin)
 
         print(f"[tq] Running: {command}")
         print(f"[tq] Directory: {working_dir}")
@@ -483,8 +513,10 @@ def cmd_run(args):
                 "task_timeout",
                 task_id=task_id,
                 queue_name=queue_name,
+                pid=os.getpid(),
                 command=command,
                 timeout_seconds=timeout,
+                **task_origin_kwargs(task_origin),
             )
             return 124  # Standard timeout exit code
 
@@ -502,9 +534,11 @@ def cmd_run(args):
             "task_completed",
             task_id=task_id,
             queue_name=queue_name,
+            pid=os.getpid(),
             command=command,
             exit_code=exit_code,
             duration_seconds=round(duration, 2),
+            **task_origin_kwargs(task_origin),
         )
 
         return exit_code
@@ -517,7 +551,9 @@ def cmd_run(args):
                 "task_error",
                 task_id=task_id,
                 queue_name=queue_name,
+                pid=os.getpid(),
                 error=str(e),
+                **task_origin_kwargs(task_origin),
             )
         return 1
 
