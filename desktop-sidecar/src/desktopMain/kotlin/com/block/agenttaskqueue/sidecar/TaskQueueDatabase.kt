@@ -1,5 +1,6 @@
 package com.block.agenttaskqueue.sidecar
 
+import java.sql.Connection
 import java.nio.file.Path
 import java.sql.DriverManager
 import java.sql.ResultSet
@@ -29,6 +30,16 @@ object TaskQueueDatabase {
                 connection.createStatement().use { statement ->
                     statement.execute("PRAGMA journal_mode=WAL")
                     statement.execute("PRAGMA busy_timeout=5000")
+                }
+
+                if (!connection.hasTable("queue")) {
+                    return QueueSnapshot.empty(
+                        dataDir = dataDir,
+                        configuration = configuration,
+                        adb = adb,
+                        metrics = metrics,
+                        statusMessage = "Waiting for queue schema at $dbPath",
+                    )
                 }
 
                 connection.createStatement().use { statement ->
@@ -72,6 +83,17 @@ object TaskQueueDatabase {
                 metrics = metrics,
                 errorMessage = error.message ?: "Failed to read $dbPath",
             )
+        }
+    }
+}
+
+private fun Connection.hasTable(tableName: String): Boolean {
+    prepareStatement(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1"
+    ).use { statement ->
+        statement.setString(1, tableName)
+        statement.executeQuery().use { resultSet ->
+            return resultSet.next()
         }
     }
 }
