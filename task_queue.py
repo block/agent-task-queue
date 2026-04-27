@@ -42,6 +42,7 @@ from queue_core import (
     normalize_queue_name,
     parse_queue_capacities,
     attempt_task_start,
+    task_origin_kwargs,
     POLL_INTERVAL_WAITING,
 )
 
@@ -156,23 +157,6 @@ def log_metric(event: str, **kwargs):
     """Log metric using configured paths."""
     PATHS.data_dir.mkdir(parents=True, exist_ok=True)
     _log_metric(PATHS.metrics_path, event, MAX_METRICS_SIZE_MB, **kwargs)
-
-
-def task_origin_kwargs(task_origin: TaskOrigin | None) -> dict[str, str]:
-    if task_origin is None:
-        return {}
-
-    return {
-        key: value
-        for key, value in {
-            "working_directory": task_origin.working_directory,
-            "worktree_root": task_origin.worktree_root,
-            "repo_name": task_origin.repo_name,
-            "git_branch": task_origin.git_branch,
-            "agent_name": task_origin.agent_name,
-        }.items()
-        if value
-    }
 
 
 def cleanup_queue(conn, queue_name: str, queue_capacities: dict[str, int] | None = None):

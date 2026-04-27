@@ -674,6 +674,31 @@ class TestAmpRestart:
             88150: "T-019dbfd5-6e1d-7548-b824-f87378e25a8e",
         }
 
+    def test_parse_amp_thread_ids_resets_when_pid_is_reused(self):
+        log_text = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "pid": 86296,
+                        "timestamp": "2026-04-24T15:05:00.000Z",
+                        "threadId": "T-019dc029-f25d-767c-8005-e2996169f6f8",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "pid": 86296,
+                        "timestamp": "2026-04-24T15:20:00.000Z",
+                        "message": "Loaded session state:",
+                        "lastThreadId": "T-019dcf45-5d79-74e8-9ae4-cde26e8f1971",
+                    }
+                ),
+            ]
+        )
+
+        assert tq.parse_amp_thread_ids_from_log(log_text, {86296}) == {
+            86296: "T-019dcf45-5d79-74e8-9ae4-cde26e8f1971",
+        }
+
     def test_amp_restart_shell_output_for_targeted_pids(self, monkeypatch, capsys):
         monkeypatch.setattr(
             tq,

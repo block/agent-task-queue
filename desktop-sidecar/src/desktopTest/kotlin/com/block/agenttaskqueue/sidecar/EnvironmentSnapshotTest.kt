@@ -25,6 +25,18 @@ class EnvironmentSnapshotTest {
     }
 
     @Test
+    fun fallsBackToTaskQueueDataDirEnvironmentWhenFlagIsOmitted() {
+        val process = parseTaskQueueProcesses(
+            """
+            73781 1 /Users/me/.venv/bin/python3 task_queue.py --queue-capacity=gradle=2 TASK_QUEUE_DATA_DIR=/tmp/custom-queue
+            """.trimIndent()
+        ).single()
+
+        assertEquals(Paths.get("/tmp/custom-queue"), process.dataDir)
+        assertEquals(2, process.queueCapacities["gradle"])
+    }
+
+    @Test
     fun parsesAdbDevicesAndMatchesEmulatorPorts() {
         val adb = parseAdbSnapshot(
             """

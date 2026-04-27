@@ -37,6 +37,7 @@ from queue_core import (
     normalize_queue_name,
     parse_queue_capacities,
     attempt_task_start,
+    task_origin_kwargs,
     POLL_INTERVAL_WAITING,
     DEFAULT_MAX_LOCK_AGE_MINUTES,
     DEFAULT_MAX_METRICS_SIZE_MB,
@@ -403,12 +404,33 @@ def parse_amp_sessions_from_ps_output(ps_output: str) -> list[AmpSession]:
     return sessions
 
 
+def _extract_thread_id_from_log_entry(entry: dict, *, allow_session_state: bool = False) -> str | None:
+    for key in ("threadId", "threadID", "newThreadID", "currentThreadID"):
+        value = entry.get(key)
+        if isinstance(value, str) and AMP_THREAD_ID_PATTERN.fullmatch(value):
+            return value
+
+    if allow_session_state:
+        value = entry.get("lastThreadId")
+        if isinstance(value, str) and AMP_THREAD_ID_PATTERN.fullmatch(value):
+            return value
+
+    message = entry.get("message")
+    if isinstance(message, str) and "Switching to thread:" in message:
+        match = AMP_THREAD_ID_PATTERN.search(message)
+        if match:
+            return match.group(0)
+
+    return None
+
+
 def parse_amp_thread_ids_from_log(
     log_text: str,
     candidate_pids: set[int] | None = None,
 ) -> dict[int, str]:
-    """Return the latest known Amp thread ID for each PID in the CLI log."""
+    """Return the latest known Amp thread ID for each live PID in the CLI log."""
     latest_thread_by_pid: dict[int, tuple[str, str]] = {}
+    latest_session_start_by_pid: dict[int, str] = {}
 
     for raw_line in log_text.splitlines():
         line = raw_line.strip()
@@ -432,18 +454,21 @@ def parse_amp_thread_ids_from_log(
         if not isinstance(timestamp, str) or not timestamp:
             continue
 
-        thread_id = None
-        for key in ("threadId", "threadID", "newThreadID"):
-            value = entry.get(key)
-            if isinstance(value, str) and AMP_THREAD_ID_PATTERN.fullmatch(value):
-                thread_id = value
+        message = entry.get("message")
+        if message == "Loaded session state:":
+            latest_session_start_by_pid[pid] = timestamp
+            thread_id = _extract_thread_id_from_log_entry(entry, allow_session_state=True)
+            if thread_id is None:
+                latest_thread_by_pid.pop(pid, None)
+            else:
+                latest_thread_by_pid[pid] = (timestamp, thread_id)
+            continue
 
-        if thread_id is None:
-            message = entry.get("message")
-            if isinstance(message, str) and "Switching to thread:" in message:
-                match = AMP_THREAD_ID_PATTERN.search(message)
-                if match:
-                    thread_id = match.group(0)
+        session_started_at = latest_session_start_by_pid.get(pid)
+        if session_started_at is not None and timestamp < session_started_at:
+            continue
+
+        thread_id = _extract_thread_id_from_log_entry(entry)
 
         if thread_id is None:
             continue
@@ -460,12 +485,20 @@ def discover_amp_sessions(cli_log_path: Path = AMP_CLI_LOG_PATH) -> list[AmpSess
     last_error = "Failed to enumerate running processes with ps"
     result = None
     for command in AMP_PS_COMMAND_CANDIDATES:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except subprocess.TimeoutExpired:
+            last_error = f"`{' '.join(command)}` timed out after 5s"
+            continue
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            last_error = f"`{' '.join(command)}` failed: {exc}"
+            continue
+
         if result.returncode == 0:
             break
         stderr = result.stderr.strip()
@@ -576,23 +609,6 @@ def cmd_amp_restart(args) -> int:
 def log_metric(paths: QueuePaths, event: str, **kwargs):
     """Log metric using paths (wrapper for CLI)."""
     _log_metric(paths.metrics_path, event, DEFAULT_MAX_METRICS_SIZE_MB, **kwargs)
-
-
-def task_origin_kwargs(task_origin: TaskOrigin | None) -> dict[str, str]:
-    if task_origin is None:
-        return {}
-
-    return {
-        key: value
-        for key, value in {
-            "working_directory": task_origin.working_directory,
-            "worktree_root": task_origin.worktree_root,
-            "repo_name": task_origin.repo_name,
-            "git_branch": task_origin.git_branch,
-            "agent_name": task_origin.agent_name,
-        }.items()
-        if value
-    }
 
 
 def cleanup_queue(

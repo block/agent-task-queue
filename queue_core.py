@@ -56,6 +56,24 @@ class TaskOrigin:
     agent_name: str | None = None
 
 
+def task_origin_kwargs(task_origin: "TaskOrigin | None") -> dict[str, str]:
+    """Return non-empty task origin fields as kwargs suitable for DB/metrics inserts."""
+    if task_origin is None:
+        return {}
+
+    return {
+        key: value
+        for key, value in {
+            "working_directory": task_origin.working_directory,
+            "worktree_root": task_origin.worktree_root,
+            "repo_name": task_origin.repo_name,
+            "git_branch": task_origin.git_branch,
+            "agent_name": task_origin.agent_name,
+        }.items()
+        if value
+    }
+
+
 # --- Database Schema ---
 QUEUE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS queue (

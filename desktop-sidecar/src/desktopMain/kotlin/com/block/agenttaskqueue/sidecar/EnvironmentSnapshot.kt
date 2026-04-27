@@ -86,7 +86,7 @@ data class AdbDevice(
 object TaskQueueProcessInspector {
     fun loadConfiguration(dataDir: Path): QueueConfigurationSnapshot {
         val normalizedDataDir = dataDir.toAbsolutePath().normalize()
-        val commandResult = runCommand("ps", "-axo", "pid=,ppid=,args=")
+        val commandResult = runCommand("ps", "eww", "-axo", "pid=,ppid=,command=")
 
         if (commandResult.errorMessage != null) {
             return QueueConfigurationSnapshot(
@@ -388,6 +388,15 @@ private fun resolveTaskQueueDataDir(tokens: List<String>): Path {
         }
         index += 1
     }
+
+    tokens.firstOrNull { it.startsWith("TASK_QUEUE_DATA_DIR=") }
+        ?.substringAfter('=')
+        ?.takeIf { it.isNotBlank() }
+        ?.let { configuredPath ->
+            return Paths.get(configuredPath)
+                .toAbsolutePath()
+                .normalize()
+        }
 
     return DEFAULT_QUEUE_DATA_DIR
 }
