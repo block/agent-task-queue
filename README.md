@@ -35,7 +35,9 @@ run_task("./gradlew build", queue_name="android", ...)
 run_task("npm run build", queue_name="web", ...)
 ```
 
-Both agents block until their respective builds complete. The server handles sequencing automatically.
+`run_task` returns the final result for short commands. For longer commands, it returns a task handle
+after at most 30 seconds while the command continues in the queue. The agent can show progress inline,
+accept steering, and call `task_status` for the next bounded update without rerunning the command.
 
 **Hierarchical queues** - Use `/`-delimited queue names plus `--queue-capacity` when you need
 parallelism with a shared cap:
@@ -74,7 +76,15 @@ each exact `queue_name` is still a FIFO queue with capacity 1.
   command: "./gradlew assembleDebug"
   working_directory: "/path/to/android-project"
 
-  ⎿  "SUCCESS exit=0 192.6s output=/tmp/agent-task-queue/output/task_1.log"
+  ⎿  "RUNNING task_id=1 queue=global elapsed=30.0s process_alive=true ..."
+
+⏺ agent-task-queue - task_status (MCP)
+  task_id: 1
+  output_offset: 4821
+
+  ... additional bounded task_status calls while the build runs ...
+
+  ⎿  "SUCCESS task_id=1 exit=0 192.6s output=/tmp/agent-task-queue/output/task_1.log"
 
 ⏺ Build completed successfully in 192.6s.
 ```
@@ -87,7 +97,14 @@ each exact `queue_name` is still a FIFO queue with capacity 1.
   command: "./gradlew assembleDebug"
   working_directory: "/path/to/android-project"
 
-  ⎿  "SUCCESS exit=0 32.6s output=/tmp/agent-task-queue/output/task_2.log"
+  ⎿  "QUEUED task_id=2 queue=global elapsed=30.0s position=1 ..."
+
+⏺ agent-task-queue - task_status (MCP)
+  task_id: 2
+
+  ... additional bounded task_status calls while queued and running ...
+
+  ⎿  "SUCCESS task_id=2 exit=0 32.6s output=/tmp/agent-task-queue/output/task_2.log"
 
 ⏺ Build completed successfully in 32.6s.
 ```
@@ -114,7 +131,9 @@ With the queue:
 ## Key Features
 
 - **FIFO Queuing**: Strict first-in-first-out ordering within each exact `queue_name`
-- **No Queue Timeouts**: MCP keeps connection alive while waiting in queue. The `timeout_seconds` parameter only applies to execution time—tasks can wait in queue indefinitely without timing out. (see [Why MCP?](#why-mcp-instead-of-a-cli-tool))
+- **Bounded Inline Progress**: Long calls yield a task handle within 30 seconds; `task_status` returns on output, a state change, completion, or another 30-second heartbeat
+- **No Queue-Wait Timeouts**: Commands can remain queued indefinitely. `timeout_seconds` starts only when execution begins.
+- **Explicit Cancellation**: Interrupting `run_task` or `task_status` leaves the command running; only `cancel_task` stops it
 - **Environment Variables**: Pass `env_vars="ANDROID_SERIAL=emulator-5560"`
 - **Multiple Queues**: Isolate different workloads with `queue_name`
 - **Zombie Protection**: Detects dead processes, kills orphans, clears stale locks
@@ -122,7 +141,7 @@ With the queue:
 
 ## Desktop Sidecar
 
-The repo also includes a minimal Compose Multiplatform desktop app in [desktop-sidecar](desktop-sidecar/README.md) for watching the queue in real time.
+The repo also includes an optional Compose Multiplatform desktop app in [desktop-sidecar](desktop-sidecar/README.md) for watching the queue in real time. It is not required for inline agent progress.
 
 It reads the same local SQLite database as `tq` and the IntelliJ plugin, then shows:
 
@@ -305,12 +324,38 @@ Agents use the `run_task` MCP tool for expensive operations:
 | `queue_name` | No | Queue identifier (default: "global") |
 | `timeout_seconds` | No | Max **execution** time before kill (default: 1200). Queue wait time doesn't count. |
 | `env_vars` | No | Environment variables: `"KEY=val,KEY2=val2"` |
+| `wait_seconds` | No | Initial wait before yielding a background handle (0–30, default: 30) |
 
 `queue_name` may be hierarchical, such as `gradle/emu-5557`, when the server is configured with
 `--queue-capacity` scopes.
 
 Sibling queues that share a parent scope compete for that parent capacity on a best-effort basis;
 FIFO ordering is guaranteed within each exact queue, not across sibling queues.
+
+### Long-Running Tasks and Inline Progress
+
+A command that does not finish during the initial bounded wait returns its state, task ID, queue
+position or process liveness, elapsed time, recent output, and `next_output_offset`:
+
+```text
+RUNNING task_id=42 queue=gradle/build elapsed=30.0s process_alive=true last_output=2.1s_ago
+
+--- NEW OUTPUT ---
+> Task :app:compileDebugKotlin
+
+Task continues in the background. Do not rerun it. Call task_status(task_id=42,
+output_offset=1234) for the next update, or cancel_task(task_id=42) to stop it.
+```
+
+Call `task_status` with the returned offset. Each status call returns as soon as output or state
+changes, when the command finishes, or after at most 30 seconds as a liveness heartbeat. This makes
+progress visible in the normal agent TUI or GUI transcript and gives the agent regular boundaries at
+which it can absorb steering. MCP progress notifications are also emitted when supported, but the
+bounded tool results do not depend on clients rendering those notifications.
+
+Cancelling or steering away from a `run_task`/`task_status` wait does **not** kill the command. Use
+`cancel_task(task_id=42)` when termination is intended. Terminal results remain queryable after the
+active queue row is released.
 
 ### Example
 
@@ -436,7 +481,7 @@ Run `uvx agent-task-queue@latest --help` to see all options.
 
 ## IntelliJ Plugin
 
-An optional [IntelliJ plugin](intellij-plugin/) provides real-time IDE integration — status bar widget, tool window with live streaming output, and balloon notifications for queue events. See the [plugin README](intellij-plugin/README.md) for details.
+An optional [IntelliJ plugin](intellij-plugin/) provides an additional status bar widget, tool window, and notifications. It is separate from the inline `run_task`/`task_status` output available in any MCP agent client. See the [plugin README](intellij-plugin/README.md) for details.
 
 ## Architecture
 
@@ -447,7 +492,7 @@ flowchart TD
     B -->|Execute| D[Subprocess<br/>gradle, docker, etc.]
 
     D -.->|stdout/stderr| B
-    B -.->|blocks until complete| A
+    B -.->|terminal result or bounded status handle| A
 ```
 
 ### Data Directory
@@ -455,12 +500,13 @@ flowchart TD
 All data is stored in `/tmp/agent-task-queue/` by default:
 - `queue.db` - SQLite database for queue state
 - `agent-task-queue-logs.json` - JSON metrics log (NDJSON format)
+- `output/task_<id>.log` and `.raw.log` - Full and incrementally readable task output
 
 To use a different location, pass `--data-dir=/path/to/data` or set the `TASK_QUEUE_DATA_DIR` environment variable.
 
 ### Database Schema
 
-The queue state is stored in SQLite at `/tmp/agent-task-queue/queue.db`:
+Active queue state is stored in the `queue` table at `/tmp/agent-task-queue/queue.db`:
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -473,6 +519,10 @@ The queue state is stored in SQLite at `/tmp/agent-task-queue/queue.db`:
 | `child_pid` | INTEGER | Subprocess ID (for orphan cleanup) |
 | `created_at` | TIMESTAMP | When task was queued |
 | `updated_at` | TIMESTAMP | Last status change |
+
+The `task_results` table stores each task's terminal result as JSON after its active `queue` row is
+released. This lets `task_status` report completion without holding a queue slot. Terminal results
+are retained with the configured output-file limit.
 
 ### Zombie Protection
 
@@ -516,17 +566,17 @@ To reduce token usage, full command output is written to files instead of return
 ```
 
 Each task produces two output files:
-- **`task_<id>.log`** — Formatted log with headers (`COMMAND:`, `WORKING DIR:`), section markers (`--- STDOUT ---`, `--- STDERR ---`, `--- SUMMARY ---`), and exit code. Used by the IntelliJ plugin notifier and the "View Output" action.
-- **`task_<id>.raw.log`** — Raw stdout+stderr only, no metadata. Used by the IntelliJ plugin for clean streaming output in tabs. Added in MCP server v0.4.0.
+- **`task_<id>.log`** — Formatted log with headers (`COMMAND:`, `WORKING DIR:`), compatibility section markers (`--- STDOUT ---`, `--- STDERR ---`, `--- SUMMARY ---`), and exit code. Stdout and stderr content may be interleaved because both pipes are drained concurrently to prevent subprocess deadlocks.
+- **`task_<id>.raw.log`** — Raw interleaved stdout+stderr with no metadata. Used for incremental `task_status` output and optional viewer streaming.
 
 **On success**, the tool returns a single line:
 ```
-SUCCESS exit=0 31.2s command=./gradlew build output=/tmp/agent-task-queue/output/task_8.log
+SUCCESS task_id=8 exit=0 31.2s command=./gradlew build output=/tmp/agent-task-queue/output/task_8.log
 ```
 
 **On failure**, the last 50 lines of output are included:
 ```
-FAILED exit=1 12.5s command=./gradlew build output=/tmp/agent-task-queue/output/task_9.log
+FAILED task_id=9 exit=1 12.5s command=./gradlew build output=/tmp/agent-task-queue/output/task_9.log
 [error output here]
 ```
 
@@ -637,15 +687,15 @@ flowchart LR
     subgraph mcp [MCP Approach]
         A2[Agent] --> |MCP Protocol| B2[Server]
         B2 --> C2[Queue]
-        B2 -.-> |"✓ blocks until complete"| A2
+        B2 -.-> |"✓ bounded inline updates"| A2
     end
 ```
 
 **Why MCP solves this:**
-- The MCP server keeps the connection alive indefinitely
-- The agent's tool call blocks until the task completes
-- No timeout configuration needed—it "just works"
-- The server manages the queue; the agent just waits
+- The MCP server owns the queued command independently from any one tool request
+- Long calls return a handle within 30 seconds instead of depending on a long client timeout
+- The agent receives incremental inline output and can accept steering between status calls
+- An interrupted status request does not cancel the command; cancellation is explicit
 
 | Aspect | CLI Wrapper | Agent Task Queue |
 |--------|-------------|----------------|
