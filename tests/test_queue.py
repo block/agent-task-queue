@@ -7,7 +7,9 @@ import pytest
 import asyncio
 import json
 import os
+import shlex
 import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,7 +43,7 @@ DB_PATH = PATHS.db_path
 
 
 @pytest.fixture(autouse=True)
-def clean_db():
+async def clean_db():
     """Clean database before each test."""
     if DB_PATH.exists():
         DB_PATH.unlink()
@@ -57,6 +59,14 @@ def clean_db():
     init_db()
     yield
     # Cleanup after test
+    background_tasks = list(task_queue._background_tasks.values())
+    for background_task in background_tasks:
+        background_task.cancel()
+    if background_tasks:
+        await asyncio.gather(*background_tasks, return_exceptions=True)
+    task_queue._background_tasks.clear()
+    with task_queue._active_task_ids_lock:
+        task_queue._active_task_ids.clear()
     if DB_PATH.exists():
         DB_PATH.unlink()
 
@@ -436,7 +446,7 @@ async def test_parent_capacity_blocks_different_child_queues(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_parent_capacity_preserves_fifo_within_child_queue(monkeypatch):
+async def test_parent_capacity_preserves_fifo_within_child_queue(monkeypatch, tmp_path):
     """A tighter parent scope should not let a younger child task jump the queue."""
     monkeypatch.setattr(
         task_queue,
@@ -445,7 +455,7 @@ async def test_parent_capacity_preserves_fifo_within_child_queue(monkeypatch):
     )
 
     results = {}
-    end_times = {}
+    execution_order = tmp_path / "execution-order.txt"
 
     async def run_parent_blocker():
         client = Client(mcp)
@@ -467,12 +477,14 @@ async def test_parent_capacity_preserves_fifo_within_child_queue(monkeypatch):
             result = await client.call_tool(
                 "run_task",
                 {
-                    "command": "sleep 1 && echo 'older child done'",
+                    "command": (
+                        "sleep 1 && echo older >> "
+                        f"{shlex.quote(str(execution_order))} && echo 'older child done'"
+                    ),
                     "working_directory": "/tmp",
                     "queue_name": "gradle/emu-5557",
                 },
             )
-            end_times["older"] = time.time()
             results["older"] = str(result)
 
     async def run_younger_child():
@@ -482,12 +494,14 @@ async def test_parent_capacity_preserves_fifo_within_child_queue(monkeypatch):
             result = await client.call_tool(
                 "run_task",
                 {
-                    "command": "echo 'younger child done'",
+                    "command": (
+                        f"echo younger >> {shlex.quote(str(execution_order))} "
+                        "&& echo 'younger child done'"
+                    ),
                     "working_directory": "/tmp",
                     "queue_name": "gradle/emu-5557",
                 },
             )
-            end_times["younger"] = time.time()
             results["younger"] = str(result)
 
     await asyncio.gather(run_parent_blocker(), run_older_child(), run_younger_child())
@@ -496,7 +510,7 @@ async def test_parent_capacity_preserves_fifo_within_child_queue(monkeypatch):
     assert "SUCCESS" in results["younger"]
     assert "older child done" in read_output_file(results["older"])
     assert "younger child done" in read_output_file(results["younger"])
-    assert end_times["older"] <= end_times["younger"]
+    assert execution_order.read_text().splitlines() == ["older", "younger"]
 
 
 @pytest.mark.asyncio
@@ -536,11 +550,219 @@ async def test_parent_capacity_allows_parallel_child_queues(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_tool_available(client):
-    """Test that the run_task tool is available."""
+    """Test that background task lifecycle tools are available."""
     async with client:
         tools = await client.list_tools()
         tool_names = [t.name for t in tools]
-        assert "run_task" in tool_names
+        assert {"run_task", "task_status", "cancel_task"} <= set(tool_names)
+
+
+@pytest.mark.asyncio
+async def test_long_task_returns_handle_and_streams_inline_output(client):
+    """A long task yields control, then exposes incremental output and its final result."""
+    async with client:
+        initial = await client.call_tool(
+            "run_task",
+            {
+                "command": "echo started; sleep 1; echo finished",
+                "working_directory": "/tmp",
+                "queue_name": "background_status_test",
+                "wait_seconds": 0,
+            },
+        )
+        initial_result = initial.structured_content["result"]
+        task_id = initial_result["task_id"]
+        offset = initial_result["next_output_offset"]
+
+        assert initial_result["status"] in {"queued", "running"}
+        assert "Task continues in the background" in str(initial)
+
+        collected_output = ""
+        final_result = initial_result
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            update = await client.call_tool(
+                "task_status",
+                {
+                    "task_id": task_id,
+                    "output_offset": offset,
+                    "wait_seconds": 2,
+                },
+            )
+            final_result = update.structured_content["result"]
+            collected_output += final_result.get("new_output", "")
+            offset = final_result["next_output_offset"]
+            if final_result["status"] not in {"queued", "running"}:
+                break
+
+        assert final_result["status"] == "success"
+        assert "started" in collected_output
+        assert "finished" in collected_output
+        with get_db() as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) AS c FROM queue WHERE id = ?",
+                (task_id,),
+            ).fetchone()["c"] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) AS c FROM task_results WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()["c"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelling_run_task_wait_does_not_cancel_command(client):
+    """Steering away from run_task only interrupts its bounded wait."""
+    async with client:
+        request = asyncio.create_task(
+            client.call_tool(
+                "run_task",
+                {
+                    "command": "sleep 1; echo survived",
+                    "working_directory": "/tmp",
+                    "queue_name": "cancelled_run_wait_test",
+                    "wait_seconds": 30,
+                },
+            )
+        )
+
+        task_id = None
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and task_id is None:
+            with get_db() as conn:
+                row = conn.execute(
+                    "SELECT id FROM queue WHERE queue_name = ?",
+                    ("cancelled_run_wait_test",),
+                ).fetchone()
+            task_id = row["id"] if row else None
+            await asyncio.sleep(0.05)
+
+        assert task_id is not None
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+
+        final = await client.call_tool(
+            "task_status",
+            {"task_id": task_id, "wait_seconds": 3},
+        )
+    assert final.structured_content["result"]["status"] == "success"
+    assert "survived" in final.structured_content["result"]["new_output"]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_status_wait_does_not_cancel_command(client):
+    """Steering away from a status heartbeat leaves the background command running."""
+    async with client:
+        initial = await client.call_tool(
+            "run_task",
+            {
+                "command": "sleep 1; echo survived status cancellation",
+                "working_directory": "/tmp",
+                "queue_name": "cancelled_status_wait_test",
+                "wait_seconds": 0,
+            },
+        )
+        initial_result = initial.structured_content["result"]
+        task_id = initial_result["task_id"]
+
+        status_wait = asyncio.create_task(
+            client.call_tool(
+                "task_status",
+                {
+                    "task_id": task_id,
+                    "output_offset": initial_result["next_output_offset"],
+                    "wait_seconds": 30,
+                },
+            )
+        )
+        await asyncio.sleep(0.2)
+        status_wait.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await status_wait
+
+        final = await client.call_tool(
+            "task_status",
+            {"task_id": task_id, "wait_seconds": 3},
+        )
+    assert final.structured_content["result"]["status"] == "success"
+    assert "survived status cancellation" in final.structured_content["result"]["new_output"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_explicitly_terminates_command(client, tmp_path):
+    """Only cancel_task stops the subprocess and records a cancelled result."""
+    marker = tmp_path / "should-not-exist"
+    async with client:
+        initial = await client.call_tool(
+            "run_task",
+            {
+                "command": f"sleep 5; touch {shlex.quote(str(marker))}",
+                "working_directory": "/tmp",
+                "queue_name": "explicit_cancel_test",
+                "wait_seconds": 0,
+            },
+        )
+        task_id = initial.structured_content["result"]["task_id"]
+
+        child_pid = None
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and child_pid is None:
+            with get_db() as conn:
+                row = conn.execute(
+                    "SELECT child_pid FROM queue WHERE id = ?",
+                    (task_id,),
+                ).fetchone()
+            child_pid = row["child_pid"] if row else None
+            await asyncio.sleep(0.05)
+
+        assert child_pid is not None
+        cancelled = await client.call_tool("cancel_task", {"task_id": task_id})
+
+    assert cancelled.structured_content["result"]["status"] == "cancelled"
+    assert not marker.exists()
+    assert not queue_core.is_process_alive(child_pid)
+    with get_db() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) AS c FROM queue WHERE id = ?",
+            (task_id,),
+        ).fetchone()["c"] == 0
+
+
+@pytest.mark.asyncio
+async def test_large_stderr_does_not_deadlock(client):
+    """stdout and stderr are drained concurrently so a full stderr pipe cannot block."""
+    script = "import sys; sys.stderr.write('x' * 2_000_000); sys.stderr.flush(); print('done')"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+
+    async with client:
+        result = await client.call_tool(
+            "run_task",
+            {
+                "command": command,
+                "working_directory": "/tmp",
+                "queue_name": "large_stderr_test",
+                "timeout_seconds": 5,
+            },
+        )
+
+    assert result.structured_content["result"]["status"] == "success"
+    assert "done" in read_output_file(str(result))
+
+
+@pytest.mark.asyncio
+async def test_background_tool_argument_validation(client):
+    async with client:
+        invalid_wait = await client.call_tool(
+            "task_status",
+            {"task_id": 1, "wait_seconds": 31},
+        )
+        invalid_offset = await client.call_tool(
+            "task_status",
+            {"task_id": 1, "output_offset": -1},
+        )
+
+    assert "wait_seconds must be between 0 and 30" in str(invalid_wait)
+    assert "output_offset cannot be negative" in str(invalid_offset)
 
 
 @pytest.mark.asyncio
@@ -1263,10 +1485,12 @@ def test_stale_server_instance_cleanup():
 # --- Configuration Tests ---
 
 
-def test_parse_args_defaults():
+def test_parse_args_defaults(monkeypatch):
     """Test that parse_args returns correct defaults."""
     import sys
     from task_queue import parse_args
+
+    monkeypatch.delenv("TASK_QUEUE_DATA_DIR", raising=False)
 
     # Save original argv and replace with empty args
     original_argv = sys.argv

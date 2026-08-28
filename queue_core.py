@@ -125,6 +125,14 @@ CREATE TABLE IF NOT EXISTS queue (
 )
 """
 
+TASK_RESULTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS task_results (
+    task_id INTEGER PRIMARY KEY,
+    result_json TEXT NOT NULL,
+    completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 # Migration to add server_id column to existing databases
 QUEUE_MIGRATION_SERVER_ID = """
 ALTER TABLE queue ADD COLUMN server_id TEXT
@@ -183,6 +191,7 @@ def init_db(paths: QueuePaths):
     paths.data_dir.mkdir(parents=True, exist_ok=True)
     with get_db(paths.db_path) as conn:
         conn.execute(QUEUE_SCHEMA)
+        conn.execute(TASK_RESULTS_SCHEMA)
         conn.execute(QUEUE_INDEX)
         # Run migrations for existing databases
         for migration in [
