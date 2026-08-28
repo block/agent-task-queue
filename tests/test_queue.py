@@ -514,26 +514,53 @@ async def test_parent_capacity_preserves_fifo_within_child_queue(monkeypatch, tm
 
 
 @pytest.mark.asyncio
-async def test_parent_capacity_allows_parallel_child_queues(monkeypatch):
+async def test_parent_capacity_allows_parallel_child_queues(monkeypatch, tmp_path):
     """A parent scope with capacity 2 should allow two child queues to run together."""
     monkeypatch.setattr(task_queue, "QUEUE_CAPACITIES", parse_queue_capacities(["gradle=2"]))
 
     results = {}
-    end_times = {}
-    overall_start = time.time()
+    markers = {
+        "A": tmp_path / "child-a-started",
+        "B": tmp_path / "child-b-started",
+    }
+    barrier_script = tmp_path / "wait-for-sibling.py"
+    barrier_script.write_text(
+        "import sys\n"
+        "import time\n"
+        "from pathlib import Path\n"
+        "mine = Path(sys.argv[1])\n"
+        "other = Path(sys.argv[2])\n"
+        "mine.touch()\n"
+        "deadline = time.monotonic() + 5\n"
+        "while not other.exists():\n"
+        "    if time.monotonic() >= deadline:\n"
+        "        raise TimeoutError('sibling child queue did not start')\n"
+        "    time.sleep(0.01)\n"
+        "print(f'{sys.argv[3]} done')\n"
+    )
 
     async def run_child(queue_name: str, result_key: str):
+        other_key = "B" if result_key == "A" else "A"
+        command = " ".join(
+            shlex.quote(part)
+            for part in (
+                sys.executable,
+                str(barrier_script),
+                str(markers[result_key]),
+                str(markers[other_key]),
+                queue_name,
+            )
+        )
         client = Client(mcp)
         async with client:
             result = await client.call_tool(
                 "run_task",
                 {
-                    "command": f"sleep 2 && echo '{queue_name} done'",
+                    "command": command,
                     "working_directory": "/tmp",
                     "queue_name": queue_name,
                 },
             )
-            end_times[result_key] = time.time()
             results[result_key] = str(result)
 
     await asyncio.gather(
@@ -541,11 +568,10 @@ async def test_parent_capacity_allows_parallel_child_queues(monkeypatch):
         run_child("gradle/emu-5559", "B"),
     )
 
-    total_elapsed = time.time() - overall_start
     assert "SUCCESS" in results["A"]
     assert "SUCCESS" in results["B"]
-    assert total_elapsed < 3.5
-    assert abs(end_times["A"] - end_times["B"]) < 1.0
+    assert markers["A"].exists()
+    assert markers["B"].exists()
 
 
 @pytest.mark.asyncio
