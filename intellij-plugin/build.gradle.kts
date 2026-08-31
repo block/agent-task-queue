@@ -1,7 +1,7 @@
 plugins {
     id("java")
-    id("org.jetbrains.kotlin.jvm") version "2.3.20"
-    id("org.jetbrains.intellij.platform") version "2.14.0"
+    id("org.jetbrains.kotlin.jvm") version "2.4.10"
+    id("org.jetbrains.intellij.platform") version "2.18.1"
 }
 
 group = providers.gradleProperty("pluginGroup").get()
@@ -19,7 +19,7 @@ dependencies {
         intellijIdeaCommunity(providers.gradleProperty("platformVersion").get())
     }
 
-    implementation("org.xerial:sqlite-jdbc:3.53.0.0")
+    implementation("org.xerial:sqlite-jdbc:3.53.4.0")
 }
 
 intellijPlatform {
