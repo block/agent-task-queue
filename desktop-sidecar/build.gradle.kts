@@ -19,7 +19,7 @@ kotlin {
                 implementation(compose.desktop.currentOs)
                 implementation(compose.foundation)
                 implementation(compose.material3)
-                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
                 implementation("org.xerial:sqlite-jdbc:3.53.0.0")
             }
