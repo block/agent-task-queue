@@ -11,7 +11,6 @@ import asyncio
 import codecs
 import json
 import os
-import resource
 import signal
 import sqlite3
 import sys
@@ -22,6 +21,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
+import psutil
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_context
 from fastmcp.tools.tool import ToolResult
@@ -318,11 +318,7 @@ def clear_output_files() -> int:
 
 def get_memory_mb() -> float:
     """Get current process memory usage in MB (RSS - resident set size)."""
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    # ru_maxrss is in bytes on Linux, kilobytes on macOS
-    if os.uname().sysname == "Darwin":
-        return usage.ru_maxrss / (1024 * 1024)  # KB to MB
-    return usage.ru_maxrss / 1024  # bytes to MB on Linux
+    return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
 
 
 # --- Core Queue Logic ---
