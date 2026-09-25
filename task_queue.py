@@ -725,6 +725,10 @@ async def _execute_command(
         command,
         cwd=working_directory,
         env=env,
+        # The server's own stdin is the MCP stdio transport. A command that inherits it can
+        # read the client's requests or leave the pipe non-blocking (Node does this for any
+        # stdin it touches), after which the server's next read fails and it shuts down.
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,

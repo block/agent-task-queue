@@ -20,6 +20,7 @@ os.environ["TASK_QUEUE_POLL_READY"] = "0.1"
 
 from datetime import datetime, timedelta
 from fastmcp import Client
+from fastmcp.client.transports import PythonStdioTransport
 import queue_core
 import task_queue
 from task_queue import (
@@ -773,6 +774,45 @@ async def test_large_stderr_does_not_deadlock(client):
 
     assert result.structured_content["result"]["status"] == "success"
     assert "done" in read_output_file(str(result))
+
+
+@pytest.mark.asyncio
+async def test_command_cannot_disturb_the_stdio_transport(tmp_path):
+    """A command must not inherit the server's stdin, which carries the MCP stdio transport.
+
+    Node marks any stdin it touches non-blocking. That flag lives on the pipe shared with an
+    inheriting parent, so the server's next read fails and it exits. This test sets the flag
+    directly, so it needs no Node, and runs the server over a real stdio transport because
+    the in-memory client used by the other tests has no stdin to share.
+    """
+    script = "import os; os.set_blocking(0, False)"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+    stdio_client = Client(
+        PythonStdioTransport(
+            Path(task_queue.__file__),
+            args=[f"--data-dir={tmp_path}"],
+            keep_alive=False,
+        )
+    )
+
+    async with stdio_client:
+        run = await stdio_client.call_tool(
+            "run_task",
+            {
+                "command": command,
+                "working_directory": "/tmp",
+                "queue_name": "stdio_transport_test",
+                "timeout_seconds": 5,
+            },
+        )
+        run_result = run.structured_content["result"]
+        status = await stdio_client.call_tool(
+            "task_status",
+            {"task_id": run_result["task_id"], "wait_seconds": 0},
+        )
+
+    assert run_result["status"] == "success"
+    assert status.structured_content["result"]["status"] == "success"
 
 
 @pytest.mark.asyncio
