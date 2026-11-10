@@ -660,6 +660,8 @@ def cleanup_queue(
         else:
             print(log_fmt(msg))
 
+    own_pid = os.getpid()
+
     # Check for dead parents (running tasks)
     runners = conn.execute(
         "SELECT id, pid, child_pid FROM queue WHERE queue_name = ? AND status = 'running'",
@@ -667,6 +669,13 @@ def cleanup_queue(
     ).fetchall()
 
     for runner in runners:
+        if runner["pid"] == own_pid:
+            # Rows registered by this process are owned by a live server by definition.
+            # is_task_queue_process only recognizes our own entrypoints, so applying it here
+            # would orphan the rows of any host that embeds the server under a different
+            # command line (e.g. `python -m pytest`, a wrapper script, or a sidecar) and
+            # kill its in-flight child process.
+            continue
         if not is_task_queue_process(runner["pid"]):
             child = runner["child_pid"]
             if child and is_process_alive(child):
@@ -693,6 +702,8 @@ def cleanup_queue(
     ).fetchall()
 
     for waiter in waiters:
+        if waiter["pid"] == own_pid:
+            continue
         if not is_task_queue_process(waiter["pid"]):
             conn.execute("DELETE FROM queue WHERE id = ?", (waiter["id"],))
             log_metric(

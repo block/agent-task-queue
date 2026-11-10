@@ -1639,3 +1639,77 @@ def test_parse_args_multiple_options():
         assert args.lock_timeout == 30
     finally:
         sys.argv = original_argv
+
+
+def test_cleanup_queue_keeps_rows_owned_by_current_process(monkeypatch, tmp_path):
+    """Rows registered by this process must never be reaped, whatever our command line is.
+
+    is_task_queue_process only recognizes our own entrypoints (`pytest`, `tq`,
+    `agent-task-queue`). A host that embeds the server under another command line - such as
+    `python -m pytest`, a wrapper script, or a sidecar - would otherwise lose its live queue
+    rows and have its in-flight child process killed as an orphan.
+    """
+    monkeypatch.setattr(queue_core, "is_task_queue_process", lambda pid: False)
+    metrics_path = tmp_path / "metrics.json"
+    my_pid = os.getpid()
+    now = datetime.now().isoformat()
+    child = subprocess.Popen(["sleep", "30"])
+
+    try:
+        with get_db() as conn:
+            waiting_id = conn.execute(
+                """INSERT INTO queue (queue_name, status, pid, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                ("own_pid_cleanup", "waiting", my_pid, now, now),
+            ).lastrowid
+            running_id = conn.execute(
+                """INSERT INTO queue (queue_name, status, pid, child_pid, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                ("own_pid_cleanup", "running", my_pid, child.pid, now, now),
+            ).lastrowid
+
+            cleanup_queue_core(conn, "own_pid_cleanup", metrics_path)
+            conn.commit()
+
+            remaining_ids = {
+                row["id"]
+                for row in conn.execute(
+                    "SELECT id FROM queue WHERE queue_name = ?",
+                    ("own_pid_cleanup",),
+                ).fetchall()
+            }
+
+        assert remaining_ids == {waiting_id, running_id}
+        assert child.poll() is None
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+
+
+def test_cleanup_queue_reaps_rows_of_dead_processes(tmp_path):
+    """The own-PID carve-out must not stop cleanup from reaping genuinely dead rows."""
+    metrics_path = tmp_path / "metrics.json"
+    dead_pid = 999999999
+    now = datetime.now().isoformat()
+
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO queue (queue_name, status, pid, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            ("dead_pid_cleanup", "waiting", dead_pid, now, now),
+        )
+        conn.execute(
+            """INSERT INTO queue (queue_name, status, pid, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            ("dead_pid_cleanup", "running", dead_pid, now, now),
+        )
+
+        cleanup_queue_core(conn, "dead_pid_cleanup", metrics_path)
+        conn.commit()
+
+        remaining = conn.execute(
+            "SELECT COUNT(*) AS c FROM queue WHERE queue_name = ?",
+            ("dead_pid_cleanup",),
+        ).fetchone()["c"]
+
+    assert remaining == 0
